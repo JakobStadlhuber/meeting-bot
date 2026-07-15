@@ -64,7 +64,7 @@ export class ZoomBot extends BotBase {
         _state.push('failed');
 
       await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
-      
+
       if (error instanceof WaitingAtLobbyRetryError) {
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'zoom', error }, this._logger);
       }
@@ -94,12 +94,36 @@ export class ZoomBot extends BotBase {
 
     this.page = await createBrowserContext(url, this._correlationId, 'zoom');
 
-    await this.page.route('**/*.exe', (route) => {
+    await this.page.route('**/*.exe', async (route) => {
       this._logger.info(`Detected .exe download: ${route.request().url()?.split('download')[0]}`);
+      await route.abort();
     });
 
-    this._logger.info('Navigating to Zoom Meeting URL...');
-    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    let usingDirectWebClient = false;
+    const visitWebClientByUrl = async (): Promise<boolean> => {
+      usingDirectWebClient = true;
+      try {
+        const wcUrl = new URL(url);
+        wcUrl.pathname = wcUrl.pathname.replace('/j/', '/wc/join/');
+        this._logger.info('Navigating to Zoom Web Client URL...', { wcUrl: wcUrl.toString(), botId: params.botId, userId: params.userId });
+        await this.page.goto(wcUrl.toString(), { waitUntil: 'domcontentloaded' });
+        return true;
+      } catch(err) {
+        usingDirectWebClient = false;
+        this._logger.info('Failed to access ZOOM web client by URL', { botId: params.botId, userId: params.userId });
+        return false;
+      }
+    };
+
+    if (config.zoomChromeCdpUrl) {
+      this._logger.info('Zoom CDP is enabled; navigating directly to the web client...');
+      if (!await visitWebClientByUrl()) {
+        throw new Error('Unable to join meeting after trying to access the web client by /wc/join/');
+      }
+    } else {
+      this._logger.info('Navigating to Zoom Meeting URL...');
+      await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    }
 
     // Accept cookies
     try {
@@ -109,7 +133,7 @@ export class ZoomBot extends BotBase {
 
       this._logger.info('Clicking the "Accept Cookies" button...', await acceptCookies.count());
       await acceptCookies.click({ force: true });
-      
+
     } catch (error) {
       this._logger.info('Unable to accept cookies...', error);
     }
@@ -118,7 +142,6 @@ export class ZoomBot extends BotBase {
     this._logger.info(`Page focus status: ${hasFocus}`);
 
     const attempts = 3;
-    let usingDirectWebClient = false;
     const findAndEnableJoinFromBrowserButton = async (retry: number): Promise<boolean> => {
       try {
         if (retry >= attempts) {
@@ -127,15 +150,6 @@ export class ZoomBot extends BotBase {
 
         const launchMeetingGetByRole = this.page.getByRole('button', { name: /Launch Meeting/i }).first();
         this._logger.info('Does Launch Meeting exist', await launchMeetingGetByRole.isVisible({ timeout: 1000 }).catch(() => false));
-
-        const launchDownloadGetByRole = this.page.getByRole('button', { name: /Download Now/i }).first();
-        const launchDownloadVisible = await launchDownloadGetByRole.isVisible({ timeout: 1000 }).catch(() => false);
-        this._logger.info('Does Download Now exist', launchDownloadVisible);
-
-        if (launchDownloadVisible) {
-          this._logger.info('Click on Download Now...');
-          await launchDownloadGetByRole.click({ force: true });
-        }
 
         const joinFromBrowser = this.page.locator('a', { hasText: 'Join from your browser' }).first();
         await joinFromBrowser.waitFor({ timeout: 4000 });
@@ -154,21 +168,6 @@ export class ZoomBot extends BotBase {
           return false;
         }
         return await findAndEnableJoinFromBrowserButton(retry + 1);
-      }
-    };
-
-    const visitWebClientByUrl = async (): Promise<boolean> => {
-      usingDirectWebClient = true;
-      try {
-        const wcUrl = new URL(url);
-        wcUrl.pathname = wcUrl.pathname.replace('/j/', '/wc/join/');
-        this._logger.info('Navigating to Zoom Web Client URL...', { wcUrl: wcUrl.toString(), botId: params.botId, userId: params.userId });
-        await this.page.goto(wcUrl.toString(), { waitUntil: 'domcontentloaded' });
-        return true;
-      } catch(err) {
-        usingDirectWebClient = false;
-        this._logger.info('Failed to access ZOOM web client by URL', { botId: params.botId, userId: params.userId });
-        return false;
       }
     };
 
@@ -220,25 +219,27 @@ export class ZoomBot extends BotBase {
       }
     };
 
-    // Join from browser
-    this._logger.info('Waiting for Join from your browser to be visible...');
-    const foundAndClickedJoinFromBrowser = await findAndEnableJoinFromBrowserButton(0);
-    
-    let navSuccess = false;
-    if (foundAndClickedJoinFromBrowser) {
-      this._logger.info('Verify the meeting web client is visible...');
-      // Ensure the page has navigated to the web client...
-      navSuccess = await waitForJoinFromBrowserNav();
-    }
-    
-    if (!foundAndClickedJoinFromBrowser || !navSuccess) {
-      await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'enable-join-from-browser', params.userId, this._logger, params.botId);
-      this._logger.info('Failed to enable Join from your browser button...', params.userId);
-      this._logger.info('Zoom Bot will now attempt to access the Web Client by URL...', params.userId);
-      const canAccess = await visitWebClientByUrl();
-      if (!canAccess) {
-        await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'direct-access-webclient', params.userId, this._logger, params.botId);
-        throw new Error('Unable to join meeting after trying to access the web client by /wc/join/');
+    if (!usingDirectWebClient) {
+      // Join from browser
+      this._logger.info('Waiting for Join from your browser to be visible...');
+      const foundAndClickedJoinFromBrowser = await findAndEnableJoinFromBrowserButton(0);
+
+      let navSuccess = false;
+      if (foundAndClickedJoinFromBrowser) {
+        this._logger.info('Verify the meeting web client is visible...');
+        // Ensure the page has navigated to the web client...
+        navSuccess = await waitForJoinFromBrowserNav();
+      }
+
+      if (!foundAndClickedJoinFromBrowser || !navSuccess) {
+        await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'enable-join-from-browser', params.userId, this._logger, params.botId);
+        this._logger.info('Failed to enable Join from your browser button...', params.userId);
+        this._logger.info('Zoom Bot will now attempt to access the Web Client by URL...', params.userId);
+        const canAccess = await visitWebClientByUrl();
+        if (!canAccess) {
+          await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'direct-access-webclient', params.userId, this._logger, params.botId);
+          throw new Error('Unable to join meeting after trying to access the web client by /wc/join/');
+        }
       }
     }
 
