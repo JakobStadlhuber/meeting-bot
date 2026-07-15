@@ -55,6 +55,18 @@ const parseOptionalNumber = (value?: string) => {
   return Number(value);
 };
 
+const zoomRecordingTransport = process.env.ZOOM_RECORDING_TRANSPORT ?? 'browser';
+if (!['browser', 'rtms'].includes(zoomRecordingTransport)) {
+  throw new Error('ZOOM_RECORDING_TRANSPORT must be browser or rtms');
+}
+
+const zoomRtmsEventTtlSeconds = process.env.ZOOM_RTMS_EVENT_TTL_SECONDS
+  ? Number(process.env.ZOOM_RTMS_EVENT_TTL_SECONDS)
+  : 3600;
+if (!Number.isFinite(zoomRtmsEventTtlSeconds) || zoomRtmsEventTtlSeconds <= 0) {
+  throw new Error('ZOOM_RTMS_EVENT_TTL_SECONDS must be a positive number');
+}
+
 export default {
   port: process.env.PORT || 3000,
   db: {
@@ -71,6 +83,18 @@ export default {
   googleChromeUserDataDir: process.env.GOOGLE_CHROME_USER_DATA_DIR,
   googleChromeStorageStatePath: process.env.GOOGLE_CHROME_STORAGE_STATE_PATH,
   zoomChromeCdpUrl: process.env.ZOOM_CHROME_CDP_URL,
+  zoomRecordingTransport: zoomRecordingTransport as 'browser' | 'rtms',
+  zoomRtms: {
+    clientId: process.env.ZOOM_RTMS_CLIENT_ID,
+    clientSecret: process.env.ZOOM_RTMS_CLIENT_SECRET,
+    webhookSecret: process.env.ZOOM_RTMS_WEBHOOK_SECRET,
+    oauthAccessToken: process.env.ZOOM_RTMS_OAUTH_ACCESS_TOKEN,
+    oauthAccountId: process.env.ZOOM_RTMS_OAUTH_ACCOUNT_ID,
+    oauthClientId: process.env.ZOOM_RTMS_OAUTH_CLIENT_ID,
+    oauthClientSecret: process.env.ZOOM_RTMS_OAUTH_CLIENT_SECRET,
+    participantUserId: process.env.ZOOM_RTMS_PARTICIPANT_USER_ID,
+    eventTtlSeconds: zoomRtmsEventTtlSeconds,
+  },
   googleAnonymousJoinRequestAttempts: process.env.GOOGLE_ANONYMOUS_JOIN_REQUEST_ATTEMPTS ?
     Number(process.env.GOOGLE_ANONYMOUS_JOIN_REQUEST_ATTEMPTS) :
     10,

@@ -49,6 +49,7 @@ function isNoSuchUploadError(err: any, userId: string, logger: Logger): boolean 
 export interface IUploader {
   uploadRecordingToRemoteStorage(options?: { forceUpload?: boolean }): Promise<boolean>;
   saveDataToTempFile(data: Buffer): Promise<boolean>;
+  useExternalFile(filePath: string, extension: string): Promise<void>;
   setRecordingDuration(durationSeconds: number): void;
 }
 
@@ -322,6 +323,48 @@ class DiskUploader implements IUploader {
       this._logger.info('Error: Unable to save the chunk to disk...', this._userId, this._teamId, err);
       return false;
     }
+  }
+
+  public async useExternalFile(filePath: string, extension: string): Promise<void> {
+    await this.waitForWritingFlag();
+    if (this.queue.length > 0) {
+      throw new Error('Cannot replace the recording while disk writes are pending');
+    }
+
+    const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
+    const targetPath = DiskUploader.getFilePath(
+      this._userId,
+      this._tempFileId,
+      normalizedExtension
+    );
+    const sourcePath = path.resolve(filePath);
+    const resolvedTarget = path.resolve(targetPath);
+
+    if (sourcePath !== resolvedTarget) {
+      await fs.promises.unlink(resolvedTarget).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+      try {
+        await fs.promises.rename(sourcePath, resolvedTarget);
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'EXDEV') throw error;
+        await fs.promises.copyFile(sourcePath, resolvedTarget);
+        await fs.promises.unlink(sourcePath);
+      }
+    }
+
+    const stats = await fs.promises.stat(resolvedTarget);
+    if (!stats.isFile() || stats.size === 0) {
+      throw new Error('External recording file is empty');
+    }
+
+    this.fileExtension = normalizedExtension;
+    this.contentType = extensionToContentType[normalizedExtension] ?? 'video/mp4';
+    this.firstChunkReceivedAt = this.firstChunkReceivedAt ?? Date.now();
+    this._logger.info('Using externally recorded media file for upload', {
+      extension: normalizedExtension,
+      size: stats.size,
+    });
   }
 
   public setRecordingDuration(durationSeconds: number): void {

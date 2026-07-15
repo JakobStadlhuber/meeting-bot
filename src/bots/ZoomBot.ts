@@ -13,6 +13,7 @@ import { uploadDebugImage } from '../services/bugService';
 import { Logger } from 'winston';
 import { handleWaitingAtLobbyError } from './MeetBotBase';
 import { ZOOM_REQUEST_DENIED } from '../constants';
+import { ZoomRtmsTransport } from '../rtms/ZoomRtmsTransport';
 
 class BotBase extends AbstractMeetBot {
   protected page: Page;
@@ -49,7 +50,12 @@ export class ZoomBot extends BotBase {
     
     try {
       const pushState = (st: BotStatus) => _state.push(st);
-      await this.joinMeeting({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, pushState, uploader });
+      const joinParams = { url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader };
+      if (config.zoomRecordingTransport === 'rtms') {
+        await new ZoomRtmsTransport(this._logger).record(joinParams, pushState);
+      } else {
+        await this.joinMeeting({ ...joinParams, pushState });
+      }
       await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
 
       // Finish the upload from the temp video

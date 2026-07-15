@@ -7,10 +7,11 @@ import microsoftRouter from './microsoft';
 import zoomRouter from './zoom';
 import { globalJobStore } from '../lib/globalJobStore';
 import { RedisConsumerService } from '../connect/RedisConsumerService';
+import { captureRawBody } from '../rtms/webhook';
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ verify: captureRawBody }));
 
 // Initialize Redis consumer service
 export const redisConsumerService = new RedisConsumerService();
