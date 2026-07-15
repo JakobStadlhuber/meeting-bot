@@ -3,6 +3,11 @@ export type ZoomRtmsEventName =
   | 'meeting.rtms_stopped'
   | 'meeting.rtms_interrupted';
 
+export enum ZoomRtmsStopReason {
+  MeetingEnded = 6,
+  StreamRevoked = 8,
+}
+
 export interface ZoomRtmsPayload {
   meeting_uuid: string;
   meeting_id?: string | number;

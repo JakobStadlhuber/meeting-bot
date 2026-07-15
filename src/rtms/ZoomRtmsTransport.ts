@@ -12,7 +12,7 @@ import {
   ZoomRtmsSdkClient,
   ZoomRtmsSdkConnectionIssue,
 } from './ZoomRtmsSdkClient';
-import { ZoomRtmsPayload, ZoomRtmsWebhookEvent } from './types';
+import { ZoomRtmsPayload, ZoomRtmsStopReason, ZoomRtmsWebhookEvent } from './types';
 import { extractZoomMeetingId } from './utils';
 
 const START_EVENT_CLOCK_SKEW_MS = 5_000;
@@ -21,9 +21,16 @@ const MEDIA_RECONNECT_WINDOW_MS = 30_000;
 const STREAM_EVENT_POLL_SECONDS = 1;
 const RECONNECT_DELAYS_MS = [3_000, 6_000, 12_000, 24_000, 30_000];
 const MAX_STREAM_RESTARTS = RECONNECT_DELAYS_MS.length;
+const FIRST_KNOWN_STOP_REASON = 1;
+const LAST_KNOWN_STOP_REASON = 26;
 
-const isTransientStopReason = (reason?: number): boolean =>
+export const isTransientStopReason = (reason?: number): reason is number =>
   typeof reason === 'number' && ((reason >= 10 && reason <= 19) || reason === 24);
+
+export const isTerminalSdkLeaveReason = (reason: number): boolean =>
+  reason >= FIRST_KNOWN_STOP_REASON
+  && reason <= LAST_KNOWN_STOP_REASON
+  && !isTransientStopReason(reason);
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -120,6 +127,67 @@ export class ZoomRtmsTransport {
       this.logger.info('Zoom RTMS recording started', { meetingId, streamId });
 
       const recordingDeadline = Date.now() + config.maxRecordingDuration * 60 * 1000;
+      const activeClient = client;
+      const restartTerminatedStream = async (stopReason: number): Promise<void> => {
+        rtmsRequested = false;
+        if (streamRestartAttempts >= MAX_STREAM_RESTARTS) {
+          throw new Error(
+            `Zoom RTMS stream restart limit reached after stop reason ${stopReason}`
+          );
+        }
+        streamRestartAttempts += 1;
+
+        const stoppedStreamId = streamId;
+        if (!stoppedStreamId) throw new Error('Zoom RTMS stream ID is unavailable');
+        this.logger.warn('Restarting terminated Zoom RTMS stream', {
+          meetingId,
+          streamId: stoppedStreamId,
+          stopReason,
+          attempt: streamRestartAttempts,
+          maxAttempts: MAX_STREAM_RESTARTS,
+        });
+        await activeClient.close();
+        await zoomRtmsEventStore.markStreamInactive(stoppedStreamId);
+
+        const restartRequestedAt = Date.now();
+        const restartJoinDeadline = Math.min(
+          recordingDeadline,
+          restartRequestedAt + config.joinWaitTime * 60 * 1000
+        );
+        rtmsRequested = true;
+        await this.api.start(
+          meetingId,
+          Math.max(0, restartJoinDeadline - Date.now())
+        );
+        const restartEventWaitMs = restartJoinDeadline - Date.now();
+        if (restartEventWaitMs <= 0) {
+          throw new Error('Timed out requesting the Zoom RTMS stream restart');
+        }
+        const restartedEvent = await this.waitForFreshStart(
+          meetingId,
+          restartRequestedAt,
+          Math.ceil(restartEventWaitMs / 1000)
+        );
+        if (!restartedEvent) {
+          throw new Error('Timed out waiting for Zoom RTMS to restart');
+        }
+
+        streamId = restartedEvent.payload.rtms_stream_id;
+        lastStartPayload = restartedEvent.payload;
+        await zoomRtmsEventStore.markStreamActive(streamId);
+        await this.connectWithBackoff(
+          activeClient,
+          lastStartPayload,
+          'restarted RTMS stream',
+          Math.min(
+            recordingDeadline,
+            this.eventDeadline(restartedEvent, SIGNAL_RECONNECT_WINDOW_MS)
+          ),
+          true
+        );
+        this.logger.info('Zoom RTMS stream restarted', { meetingId, streamId });
+      };
+
       while (!terminalStopReceived) {
         const remainingSeconds = Math.ceil((recordingDeadline - Date.now()) / 1000);
         if (remainingSeconds <= 0) break;
@@ -131,7 +199,7 @@ export class ZoomRtmsTransport {
 
         if (event?.event === 'meeting.rtms_stopped') {
           rtmsRequested = false;
-          if (event.payload.stop_reason === 8) {
+          if (event.payload.stop_reason === ZoomRtmsStopReason.StreamRevoked) {
             throw new KnownError(
               'Zoom RTMS consent was revoked; the recording was discarded',
               false,
@@ -140,61 +208,7 @@ export class ZoomRtmsTransport {
           }
 
           if (isTransientStopReason(event.payload.stop_reason)) {
-            if (streamRestartAttempts >= MAX_STREAM_RESTARTS) {
-              throw new Error(
-                `Zoom RTMS stream restart limit reached after stop reason ${event.payload.stop_reason}`
-              );
-            }
-            streamRestartAttempts += 1;
-
-            const stoppedStreamId = streamId;
-            this.logger.warn('Restarting terminated Zoom RTMS stream', {
-              meetingId,
-              streamId: stoppedStreamId,
-              stopReason: event.payload.stop_reason,
-              attempt: streamRestartAttempts,
-              maxAttempts: MAX_STREAM_RESTARTS,
-            });
-            await client.close();
-            await zoomRtmsEventStore.markStreamInactive(stoppedStreamId);
-
-            const restartRequestedAt = Date.now();
-            const restartJoinDeadline = Math.min(
-              recordingDeadline,
-              restartRequestedAt + config.joinWaitTime * 60 * 1000
-            );
-            rtmsRequested = true;
-            await this.api.start(
-              meetingId,
-              Math.max(0, restartJoinDeadline - Date.now())
-            );
-            const restartEventWaitMs = restartJoinDeadline - Date.now();
-            if (restartEventWaitMs <= 0) {
-              throw new Error('Timed out requesting the Zoom RTMS stream restart');
-            }
-            const restartedEvent = await this.waitForFreshStart(
-              meetingId,
-              restartRequestedAt,
-              Math.ceil(restartEventWaitMs / 1000)
-            );
-            if (!restartedEvent) {
-              throw new Error('Timed out waiting for Zoom RTMS to restart');
-            }
-
-            streamId = restartedEvent.payload.rtms_stream_id;
-            lastStartPayload = restartedEvent.payload;
-            await zoomRtmsEventStore.markStreamActive(streamId);
-            await this.connectWithBackoff(
-              client,
-              lastStartPayload,
-              'restarted RTMS stream',
-              Math.min(
-                recordingDeadline,
-                this.eventDeadline(restartedEvent, SIGNAL_RECONNECT_WINDOW_MS)
-              ),
-              true
-            );
-            this.logger.info('Zoom RTMS stream restarted', { meetingId, streamId });
+            await restartTerminatedStream(event.payload.stop_reason);
             continue;
           }
 
@@ -243,6 +257,39 @@ export class ZoomRtmsTransport {
 
         const connectionIssue = client.takeConnectionIssue();
         if (connectionIssue) {
+          if (
+            connectionIssue.type === 'left'
+            && connectionIssue.reason === ZoomRtmsStopReason.StreamRevoked
+          ) {
+            throw new KnownError(
+              'Zoom RTMS consent was revoked; the recording was discarded',
+              false,
+              0
+            );
+          }
+
+          if (
+            connectionIssue.type === 'left'
+            && isTerminalSdkLeaveReason(connectionIssue.reason)
+          ) {
+            terminalStopReceived = true;
+            rtmsRequested = false;
+            this.logger.info('Zoom RTMS stream ended; finalizing recording', {
+              meetingId,
+              streamId,
+              stopReason: connectionIssue.reason,
+            });
+            continue;
+          }
+
+          if (
+            connectionIssue.type === 'left'
+            && isTransientStopReason(connectionIssue.reason)
+          ) {
+            await restartTerminatedStream(connectionIssue.reason);
+            continue;
+          }
+
           if (!lastStartPayload) throw new Error('Zoom RTMS reconnect details are unavailable');
           const reconnectWindow = connectionIssue.type === 'media_interrupted'
             ? MEDIA_RECONNECT_WINDOW_MS
