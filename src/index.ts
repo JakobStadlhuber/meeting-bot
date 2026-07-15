@@ -7,6 +7,7 @@ import messageBroker from './connect/messageBroker';
 import config from './config';
 import { isPodMarkedForDeletion } from './util/k8sLifecycle';
 import { loggerFactory } from './util/logger';
+import { zoomRtmsEventStore } from './rtms/ZoomRtmsEventStore';
 
 const port = 3000;
 
@@ -104,6 +105,7 @@ export const gracefulShutdownApp = () => {
     } else {
       console.log('Redis services not running - skipping Redis shutdown');
     }
+    await zoomRtmsEventStore.close();
 
     console.log('Exiting.....');
     process.exit(0);

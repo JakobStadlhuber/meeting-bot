@@ -24,7 +24,7 @@ An open-source automation bot for joining and recording video meetings across mu
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 22+
 - Docker and Docker Compose (for containerized deployment)
 - Git
 
@@ -124,6 +124,19 @@ Content-Type: application/json
   "botId": "UUID"
 }
 ```
+
+Zoom uses the browser recorder by default. `ZOOM_CHROME_CDP_URL` remains available for that transport.
+
+To record through Zoom Realtime Media Streams instead, set `ZOOM_RECORDING_TRANSPORT=rtms` and configure a user-managed Zoom General app with RTMS enabled. Set its public HTTPS webhook endpoint to `POST /zoom/rtms/webhook` and subscribe to `meeting.rtms_started`, `meeting.rtms_stopped`, and `meeting.rtms_interrupted`.
+
+Required settings:
+
+- `ZOOM_RTMS_CLIENT_ID`, `ZOOM_RTMS_CLIENT_SECRET`, `ZOOM_RTMS_WEBHOOK_SECRET`
+- Prefer a Server-to-Server OAuth app with `ZOOM_RTMS_OAUTH_ACCOUNT_ID`, `ZOOM_RTMS_OAUTH_CLIENT_ID`, and `ZOOM_RTMS_OAUTH_CLIENT_SECRET`; a short-lived `ZOOM_RTMS_OAUTH_ACCESS_TOKEN` is also supported for local testing
+- `ZOOM_RTMS_PARTICIPANT_USER_ID` to select and correlate the authorized host when using account-level OAuth
+- `REDIS_CONSUMER_ENABLED=true` for staging/production so webhook events reach the correct recording replica
+
+The General app needs `meeting:read:meeting_audio` and `meeting:read:meeting_video`; the OAuth app needs `meeting:update:participant_rtms_app_status` or its admin variant. The app must be authorized by the meeting host/account. RTMS does not anonymously join arbitrary Zoom links; the password in a join URL is not used. The RTMS output contains Zoom's mixed audio and active-speaker H.264 video and is uploaded as MP4 through the existing uploader. The official RTMS Node SDK currently requires Linux x64 (or macOS arm64); the browser transport remains available on other image architectures.
 
 ### Recording Completion Notifications (Optional)
 
