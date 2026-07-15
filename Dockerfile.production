@@ -5,6 +5,7 @@ RUN cp "$(g++ -print-file-name=libstdc++.so.6)" /libstdc++.so.6
 FROM node:22-bookworm
 
 COPY --from=rtms-cxx-runtime /libstdc++.so.6 /opt/rtms/libstdc++.so.6
+ENV LD_LIBRARY_PATH=/opt/rtms
 
 # Set the working directory
 WORKDIR /usr/src/app
