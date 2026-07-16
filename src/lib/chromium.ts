@@ -206,6 +206,7 @@ function getBrowserArgs(botType: BotType): string[] {
     '--auto-accept-this-tab-capture',
     '--autoplay-policy=no-user-gesture-required',
     '--disable-background-timer-throttling',
+    '--disable-blink-features=AutomationControlled',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
   ];
@@ -231,6 +232,9 @@ async function configurePage(
   correlationId: string,
 ): Promise<void> {
   await resizeBrowserWindow(page, correlationId);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
   await page.setViewportSize(VIEWPORT_SIZE);
   await applyPageEnvironment(page, timezoneId, correlationId);
 }
