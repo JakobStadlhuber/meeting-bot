@@ -24,7 +24,10 @@ import {
   ZoomJoinState,
 } from './zoomJoinState';
 import { reportRecoveredZoomFallback } from '../monitoring/sentry';
-import { dismissZoomOptionalMediaPrompt } from './zoomPrejoinModal';
+import {
+  clickZoomJoinWithOptionalMediaPromptRetry,
+  dismissZoomOptionalMediaPrompt,
+} from './zoomPrejoinModal';
 
 class BotBase extends AbstractMeetBot {
   protected page: Page;
@@ -420,7 +423,10 @@ export class ZoomBot extends BotBase {
     await dismissZoomOptionalMediaPrompt(iframe, 500);
     const joinButton = iframe.locator('button', { hasText: 'Join' }).first();
     await joinButton.waitFor({ timeout: 15000 });
-    await joinButton.click();
+    await clickZoomJoinWithOptionalMediaPromptRetry(
+      iframe,
+      () => joinButton.click({ timeout: 2_000 })
+    );
     this.joinState = 'waiting_room';
 
     const lobbyDeadline = Date.now() + config.joinWaitTime * 60 * 1000;
