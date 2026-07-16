@@ -86,6 +86,7 @@ chrome_args=(
   '--no-first-run'
   '--no-default-browser-check'
   '--disable-background-timer-throttling'
+  '--disable-blink-features=AutomationControlled'
   '--disable-backgrounding-occluded-windows'
   '--disable-renderer-backgrounding'
 )
