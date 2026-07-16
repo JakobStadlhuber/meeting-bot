@@ -194,6 +194,13 @@ async function connectToExternalChromeWithRetry(cdpUrl: string, correlationId: s
   throw new Error(`Unable to connect to external Chrome within ${CDP_CONNECT_TIMEOUT_MS}ms: ${detail}`);
 }
 
+
+function getStorageStatePath(botType: BotType): string | undefined {
+  if (botType === 'google') return config.googleChromeStorageStatePath;
+  if (botType === 'zoom') return config.zoomChromeStorageStatePath;
+  return undefined;
+}
+
 function getBrowserArgs(botType: BotType): string[] {
   const args = [
     '--no-first-run',
@@ -234,6 +241,30 @@ async function configurePage(
   await resizeBrowserWindow(page, correlationId);
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    // Automated Chrome returns 'denied' for Notification.permission, real
+    // Chrome returns 'default' — match real browser behaviour.
+    if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
+      Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+    }
+    const origQuery = navigator.permissions?.query?.bind(navigator.permissions);
+    if (origQuery) {
+      navigator.permissions.query = (parameters: PermissionDescriptor) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: 'prompt', onchange: null } as PermissionStatus)
+          : origQuery(parameters);
+    }
+    // Ensure navigator.languages matches Accept-Language header.
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en'],
+    });
+    // Ensure window.chrome.runtime exists (missing in some CDP setups).
+    const w = window as any;
+    if (typeof w.chrome === 'undefined') {
+      w.chrome = {};
+    }
+    if (w.chrome && !w.chrome.runtime) {
+      w.chrome.runtime = {};
+    }
   });
   await page.setViewportSize(VIEWPORT_SIZE);
   await applyPageEnvironment(page, timezoneId, correlationId);
@@ -318,8 +349,8 @@ async function createBrowserContext(
       const existingContext = botType === 'google' ? browser.contexts()[0] : undefined;
       context = existingContext ?? await browser.newContext({
         ...contextOptions,
-        ...(botType === 'google' && config.googleChromeStorageStatePath
-          ? { storageState: config.googleChromeStorageStatePath }
+        ...(getStorageStatePath(botType)
+          ? { storageState: getStorageStatePath(botType) }
           : {}),
       });
       ownsContext = !existingContext;
@@ -358,7 +389,7 @@ async function createBrowserContext(
         handleSIGTERM: false,
         handleSIGHUP: false,
         args: browserArgs,
-        ignoreDefaultArgs: ['--mute-audio'],
+        ignoreDefaultArgs: ['--mute-audio', '--enable-automation'],
         executablePath: config.chromeExecutablePath,
       }),
       60_000,
@@ -394,7 +425,7 @@ async function createBrowserContext(
       handleSIGTERM: false,
       handleSIGHUP: false,
       args: browserArgs,
-      ignoreDefaultArgs: ['--mute-audio'],
+      ignoreDefaultArgs: ['--mute-audio', '--enable-automation'],
       executablePath: config.chromeExecutablePath,
     }),
     60_000,
@@ -407,8 +438,8 @@ async function createBrowserContext(
   try {
     context = await browser.newContext({
       ...contextOptions,
-      ...(config.googleChromeStorageStatePath && botType === 'google'
-        ? { storageState: config.googleChromeStorageStatePath }
+      ...(getStorageStatePath(botType)
+        ? { storageState: getStorageStatePath(botType) }
         : {}),
     });
 

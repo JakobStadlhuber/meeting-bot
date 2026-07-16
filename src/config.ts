@@ -163,6 +163,7 @@ export default {
   googleChromeUserDataDir: process.env.GOOGLE_CHROME_USER_DATA_DIR,
   googleChromeStorageStatePath: process.env.GOOGLE_CHROME_STORAGE_STATE_PATH,
   zoomChromeCdpUrl: process.env.ZOOM_CHROME_CDP_URL,
+  zoomChromeStorageStatePath: process.env.ZOOM_CHROME_STORAGE_STATE_PATH,
   zoomRecordingTransport: zoomRecordingTransport as 'browser' | 'rtms',
   zoomRtmsFallbackEnabled: process.env.ZOOM_RTMS_FALLBACK_ENABLED === 'true',
   zoomRtms: {
