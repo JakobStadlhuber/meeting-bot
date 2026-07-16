@@ -1,6 +1,7 @@
 import axios, { AxiosError } from 'axios';
-import config from '../config';
+import crypto from 'crypto';
 import { KnownError } from '../error';
+import { ZoomRtmsApiCredentials, ZoomRtmsStartResult } from './types';
 
 type RtmsAction = 'start' | 'stop';
 
@@ -23,15 +24,20 @@ const asAxiosError = (error: unknown): AxiosError<ZoomApiErrorBody> | undefined 
   axios.isAxiosError<ZoomApiErrorBody>(error) ? error : undefined;
 
 export class ZoomRtmsApi {
-  private cachedToken?: CachedToken;
+  private static readonly tokenCache = new Map<string, CachedToken>();
 
   constructor(
+    private readonly credentials: ZoomRtmsApiCredentials,
     private readonly wait: (milliseconds: number) => Promise<void> =
       (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     private readonly now: () => number = Date.now
   ) {}
 
-  async start(meetingId: string, retryTimeoutMs = 0): Promise<void> {
+  static clearTokenCache(): void {
+    this.tokenCache.clear();
+  }
+
+  async start(meetingId: string, retryTimeoutMs = 0): Promise<ZoomRtmsStartResult> {
     const retryWindowMs = Number.isFinite(retryTimeoutMs)
       ? Math.max(0, retryTimeoutMs)
       : 0;
@@ -45,8 +51,11 @@ export class ZoomRtmsApi {
           ? Math.max(1, Math.min(REQUEST_TIMEOUT_MS, remainingMs))
           : REQUEST_TIMEOUT_MS;
         await this.sendStatusRequest(meetingId, 'start', requestTimeoutMs);
-        return;
+        return { status: 'requested' };
       } catch (error: unknown) {
+        if (this.isAwaitingExternalAuthorization(error)) {
+          return { status: 'awaiting_external_authorization', httpStatus: 403 };
+        }
         const remainingMs = deadline - this.now();
         if (!this.isRetryableStartError(error) || remainingMs <= 0) {
           throw this.toKnownError(error, 'start');
@@ -74,7 +83,7 @@ export class ZoomRtmsApi {
     action: RtmsAction,
     timeout: number
   ): Promise<void> {
-    const clientId = config.zoomRtms.clientId;
+    const clientId = this.credentials.rtmsClientId;
     if (!clientId) {
       throw new KnownError('ZOOM_RTMS_CLIENT_ID is required for RTMS', false, 0);
     }
@@ -83,8 +92,8 @@ export class ZoomRtmsApi {
     const settings: { client_id: string; participant_user_id?: string } = {
       client_id: clientId,
     };
-    if (config.zoomRtms.participantUserId) {
-      settings.participant_user_id = config.zoomRtms.participantUserId;
+    if (this.credentials.participantUserId) {
+      settings.participant_user_id = this.credentials.participantUserId;
     }
 
     await axios.patch(
@@ -108,6 +117,14 @@ export class ZoomRtmsApi {
       || (status >= 500 && status < 600);
   }
 
+  private isAwaitingExternalAuthorization(error: unknown): boolean {
+    const axiosError = asAxiosError(error);
+    const code = Number(axiosError?.response?.data?.code);
+    return this.credentials.source === 'customer'
+      && axiosError?.response?.status === 403
+      && (code === 2308 || code === 2309);
+  }
+
   private toKnownError(error: unknown, action: RtmsAction): KnownError {
     if (error instanceof KnownError) return error;
 
@@ -124,15 +141,17 @@ export class ZoomRtmsApi {
   }
 
   private async getAccessToken(): Promise<string> {
-    if (config.zoomRtms.oauthAccessToken) {
-      return config.zoomRtms.oauthAccessToken;
+    if (this.credentials.oauthAccessToken) {
+      return this.credentials.oauthAccessToken;
     }
 
-    if (this.cachedToken && this.cachedToken.expiresAt > Date.now()) {
-      return this.cachedToken.value;
+    const cacheKey = this.tokenCacheKey();
+    const cachedToken = ZoomRtmsApi.tokenCache.get(cacheKey);
+    if (cachedToken && cachedToken.expiresAt > this.now()) {
+      return cachedToken.value;
     }
 
-    const { oauthAccountId, oauthClientId, oauthClientSecret } = config.zoomRtms;
+    const { oauthAccountId, oauthClientId, oauthClientSecret } = this.credentials;
     if (!oauthAccountId || !oauthClientId || !oauthClientSecret) {
       throw new KnownError(
         'Configure ZOOM_RTMS_OAUTH_ACCESS_TOKEN or the ZOOM_RTMS_OAUTH_ACCOUNT_ID/CLIENT_ID/CLIENT_SECRET settings',
@@ -155,11 +174,12 @@ export class ZoomRtmsApi {
         }
       );
       const expiresIn = Math.max(60, response.data.expires_in ?? 3600);
-      this.cachedToken = {
+      const cachedToken = {
         value: response.data.access_token,
-        expiresAt: Date.now() + (expiresIn - 30) * 1000,
+        expiresAt: this.now() + (expiresIn - 30) * 1000,
       };
-      return this.cachedToken.value;
+      ZoomRtmsApi.tokenCache.set(cacheKey, cachedToken);
+      return cachedToken.value;
     } catch (error: unknown) {
       const axiosError = asAxiosError(error);
       const status = axiosError?.response?.status;
@@ -172,5 +192,14 @@ export class ZoomRtmsApi {
         0
       );
     }
+  }
+
+  private tokenCacheKey(): string {
+    const identity = [
+      this.credentials.oauthAccountId,
+      this.credentials.oauthClientId,
+      this.credentials.oauthClientSecret,
+    ].join('\0');
+    return crypto.createHash('sha256').update(identity).digest('hex');
   }
 }

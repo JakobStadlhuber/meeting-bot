@@ -8,6 +8,7 @@ import zoomRouter from './zoom';
 import { globalJobStore } from '../lib/globalJobStore';
 import { RedisConsumerService } from '../connect/RedisConsumerService';
 import { captureRawBody } from '../rtms/webhook';
+import { captureOperationalError } from '../monitoring/sentry';
 
 const app = express();
 
@@ -84,6 +85,7 @@ export const getIsBusy = () => isbusy;
 if (config.isRedisEnabled) {
   redisConsumerService.start().catch((error) => {
     console.error('Failed to start Redis consumer service:', error);
+    captureOperationalError(error, { phase: 'redis_consumer_startup' });
   });
 } else {
   console.info('Redis consumer service not started - Redis is disabled');

@@ -19,6 +19,82 @@ export const NODE_ENV: Environment = ENVIRONMENTS.includes(
 
 console.log('NODE_ENV', process.env.NODE_ENV);
 
+export interface ZoomRtmsCustomerCredentials {
+  enabled: boolean;
+  accountId: string;
+  clientId: string;
+  clientSecret: string;
+  participantUserId: string;
+}
+
+export interface ZoomRtmsCustomerCredentialsParseResult {
+  credentials: Record<string, ZoomRtmsCustomerCredentials>;
+  entryErrors: Record<string, string>;
+  error?: string;
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object'
+  && value !== null
+  && !Array.isArray(value);
+
+export const parseZoomRtmsCustomerCredentials = (
+  rawValue?: string
+): ZoomRtmsCustomerCredentialsParseResult => {
+  const credentials: Record<string, ZoomRtmsCustomerCredentials> = Object.create(null);
+  const entryErrors: Record<string, string> = Object.create(null);
+  if (!rawValue?.trim()) return { credentials, entryErrors };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawValue);
+  } catch {
+    return {
+      credentials,
+      entryErrors,
+      error: 'ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON must contain valid JSON',
+    };
+  }
+
+  if (!isPlainObject(parsed)) {
+    return {
+      credentials,
+      entryErrors,
+      error: 'ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON must be an object keyed by teamId',
+    };
+  }
+
+  for (const [teamId, value] of Object.entries(parsed)) {
+    if (!teamId.trim() || !isPlainObject(value)) {
+      entryErrors[teamId] = 'customer credentials must be an object';
+      continue;
+    }
+
+    const invalidFields: string[] = [];
+    if (typeof value.enabled !== 'boolean') invalidFields.push('enabled');
+    for (const field of ['accountId', 'clientId', 'clientSecret', 'participantUserId'] as const) {
+      if (typeof value[field] !== 'string' || !value[field].trim()) {
+        invalidFields.push(field);
+      }
+    }
+
+    if (invalidFields.length > 0) {
+      entryErrors[teamId] = `invalid or missing fields: ${invalidFields.join(', ')}`;
+      continue;
+    }
+
+    credentials[teamId] = {
+      enabled: value.enabled as boolean,
+      accountId: (value.accountId as string).trim(),
+      clientId: (value.clientId as string).trim(),
+      clientSecret: (value.clientSecret as string).trim(),
+      participantUserId: (value.participantUserId as string).trim(),
+    };
+  }
+
+  return { credentials, entryErrors };
+};
+
 const requiredSettings = [
   'GCP_DEFAULT_REGION',
   'GCP_MISC_BUCKET',
@@ -67,6 +143,10 @@ if (!Number.isFinite(zoomRtmsEventTtlSeconds) || zoomRtmsEventTtlSeconds <= 0) {
   throw new Error('ZOOM_RTMS_EVENT_TTL_SECONDS must be a positive number');
 }
 
+const zoomRtmsCustomerCredentials = parseZoomRtmsCustomerCredentials(
+  process.env.ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON
+);
+
 export default {
   port: process.env.PORT || 3000,
   db: {
@@ -84,6 +164,7 @@ export default {
   googleChromeStorageStatePath: process.env.GOOGLE_CHROME_STORAGE_STATE_PATH,
   zoomChromeCdpUrl: process.env.ZOOM_CHROME_CDP_URL,
   zoomRecordingTransport: zoomRecordingTransport as 'browser' | 'rtms',
+  zoomRtmsFallbackEnabled: process.env.ZOOM_RTMS_FALLBACK_ENABLED === 'true',
   zoomRtms: {
     clientId: process.env.ZOOM_RTMS_CLIENT_ID,
     clientSecret: process.env.ZOOM_RTMS_CLIENT_SECRET,
@@ -94,6 +175,9 @@ export default {
     oauthClientSecret: process.env.ZOOM_RTMS_OAUTH_CLIENT_SECRET,
     participantUserId: process.env.ZOOM_RTMS_PARTICIPANT_USER_ID,
     eventTtlSeconds: zoomRtmsEventTtlSeconds,
+    customerCredentials: zoomRtmsCustomerCredentials.credentials,
+    customerCredentialErrors: zoomRtmsCustomerCredentials.entryErrors,
+    customerCredentialsError: zoomRtmsCustomerCredentials.error,
   },
   googleAnonymousJoinRequestAttempts: process.env.GOOGLE_ANONYMOUS_JOIN_REQUEST_ATTEMPTS ?
     Number(process.env.GOOGLE_ANONYMOUS_JOIN_REQUEST_ATTEMPTS) :

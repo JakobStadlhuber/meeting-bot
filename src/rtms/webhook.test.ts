@@ -58,8 +58,15 @@ test('validates Zoom challenges and signed RTMS events', async () => {
   const originalRedisEnabled = config.isRedisEnabled;
   config.zoomRtms.webhookSecret = 'webhook-secret';
   config.isRedisEnabled = false;
+  const eventScope = { customerId: 'team-a', operatorId: 'operator-id' };
 
   try {
+    await zoomRtmsEventStore.reserveMeeting(
+      '12345678901',
+      'webhook-test-owner',
+      60,
+      eventScope
+    );
     const challenge = await send({
       body: {
         event: 'endpoint.url_validation',
@@ -95,7 +102,13 @@ test('validates Zoom challenges and signed RTMS events', async () => {
     });
     assert.equal(signed.statusCode, 204);
     assert.equal(
-      (await zoomRtmsEventStore.waitForMeetingStart('12345678901', 1))?.payload.rtms_stream_id,
+      (
+        await zoomRtmsEventStore.waitForMeetingStart(
+          '12345678901',
+          eventScope,
+          1
+        )
+      )?.payload.rtms_stream_id,
       'stream-id'
     );
 
@@ -106,6 +119,11 @@ test('validates Zoom challenges and signed RTMS events', async () => {
     });
     assert.equal(rejected.statusCode, 401);
   } finally {
+    await zoomRtmsEventStore.releaseMeeting(
+      '12345678901',
+      'webhook-test-owner',
+      eventScope
+    );
     config.zoomRtms.webhookSecret = originalSecret;
     config.isRedisEnabled = originalRedisEnabled;
   }

@@ -89,7 +89,7 @@ Content-Type: application/json
 
 For Google Meet, you can optionally connect to an already-running Chrome via `GOOGLE_CHROME_CDP_URL`, or run the browser with a dedicated signed-in Google profile by setting `GOOGLE_CHROME_USER_DATA_DIR` or `GOOGLE_CHROME_STORAGE_STATE_PATH`. The CDP option is useful when the Docker browser is treated differently from a normal Chrome. If you use CDP, launch that Chrome with `--auto-accept-this-tab-capture` so recording can select the current Meet tab without a manual browser prompt. The Chrome window and virtual display should normally use `1280,800`; the bot then sets the page viewport to `1280x720`, leaving room for Chrome's top UI without clipping the Meet controls.
 
-For Kubernetes, run Chrome as a sidecar container in the same pod and point `GOOGLE_CHROME_CDP_URL` at `http://127.0.0.1:9222`. The included `Dockerfile.chrome-cdp` builds a minimal Google Chrome + Xvfb CDP backend for that setup.
+For Kubernetes, run Chrome as a sidecar container in the same pod and point `GOOGLE_CHROME_CDP_URL` and `ZOOM_CHROME_CDP_URL` at `http://127.0.0.1:9223`. The included `Dockerfile.chrome-cdp` builds a Google Chrome + Xvfb CDP backend for that setup.
 
 For **local testing**, `docker compose up --build` starts the `chrome-cdp` sidecar alongside the bot and wires `GOOGLE_CHROME_CDP_URL` to it automatically (via the sidecar's nginx proxy on `9223`, which rewrites the `Host` header so cross-container CDP works). If host port `6379` is already taken by another local Redis, start with `REDIS_PORT_HOST=6380 docker compose up --build`. Join a Meet that allows guests, make sure a second participant is present (the bot leaves if it's alone), then `POST /google/join` (see above) and follow `docker compose logs -f meeting-bot`. The recording **upload will fail** without configured storage credentials — that's expected; the join and recording are what this exercises. Set `GOOGLE_CHROME_CDP_URL=` (empty) to fall back to the bot's in-container Chromium. This sidecar joins as an anonymous guest; meetings that require sign-in need a signed-in profile (`GOOGLE_CHROME_USER_DATA_DIR`/`GOOGLE_CHROME_STORAGE_STATE_PATH`), not yet wired into the local compose.
 
@@ -125,7 +125,21 @@ Content-Type: application/json
 }
 ```
 
-Zoom uses the browser recorder by default. `ZOOM_CHROME_CDP_URL` remains available for that transport.
+Zoom uses the browser recorder by default. With `ZOOM_RTMS_FALLBACK_ENABLED=true`, only an explicit Zoom automated-bot rejection before admission can fall back to RTMS. Host rejection, sign-in requirements, lobby timeouts, browser crashes and recording failures never trigger that fallback.
+
+Fallback credentials are selected by the job's `teamId` from `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON`. Store S2S account credentials, not short-lived access tokens:
+
+```json
+{
+  "team-id": {
+    "enabled": true,
+    "accountId": "zoom-account-id",
+    "clientId": "zoom-s2s-client-id",
+    "clientSecret": "zoom-s2s-client-secret",
+    "participantUserId": "zoom-user-id"
+  }
+}
+```
 
 To record through Zoom Realtime Media Streams instead, set `ZOOM_RECORDING_TRANSPORT=rtms` and configure a user-managed Zoom General app with RTMS enabled. Set its public HTTPS webhook endpoint to `POST /zoom/rtms/webhook` and subscribe to `meeting.rtms_started`, `meeting.rtms_stopped`, and `meeting.rtms_interrupted`.
 
@@ -484,6 +498,14 @@ Notes:
 | `TEAMS_PREWARM_ENABLED` | Enable the extra Microsoft Teams warmup browser pass for environments that still show first-run dialogs | `false` |
 | `TEAMS_AUDIO_STABILIZATION_MS` | Delay before starting Microsoft Teams ffmpeg recording after joining | `1000` |
 | `GOOGLE_CHROME_CDP_URL` | Optional CDP endpoint for Google Meet joins, e.g. `http://host.docker.internal:9222`, to use an external Chrome instead of Docker Chrome. | - |
+| `ZOOM_CHROME_CDP_URL` | Optional CDP endpoint for isolated Zoom browser contexts. | - |
+| `ZOOM_RECORDING_TRANSPORT` | Primary Zoom transport (`browser` or `rtms`). | `browser` |
+| `ZOOM_RTMS_FALLBACK_ENABLED` | Allow RTMS only after an explicit pre-join Zoom automated-bot block. | `false` |
+| `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` | Team-keyed S2S OAuth credentials for the RTMS fallback. | - |
+| `SENTRY_DSN` | Optional Sentry DSN; monitoring is a complete no-op when omitted. | - |
+| `SENTRY_ENVIRONMENT` | Sentry environment tag. | `NODE_ENV` |
+| `SENTRY_RELEASE` | Sentry release tag. | - |
+| `CHROME_NO_SANDBOX` | Keep `true` for the hardened v1.3.6 sidecar; Chrome's setuid sandbox cannot create its namespace with dropped capabilities. | `true` |
 | `GOOGLE_CHROME_USER_DATA_DIR` | Optional persistent Chrome profile directory for Google Meet joins. Use a dedicated signed-in Google account profile. | - |
 | `GOOGLE_CHROME_STORAGE_STATE_PATH` | Optional Playwright storage state JSON for Google Meet joins when not using a persistent profile. | - |
 | `GOOGLE_ANONYMOUS_JOIN_REQUEST_ATTEMPTS` | Number of times to re-submit an anonymous Google Meet guest request if Meet redirects while waiting for host admission. | `10` |

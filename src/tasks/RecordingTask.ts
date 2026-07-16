@@ -184,6 +184,29 @@ export class RecordingTask extends Task<null, void> {
 
             loneTest = setInterval(() => {
               try {
+                const terminalText = (dom.body?.innerText ?? '').toLowerCase();
+                const participantWasRemoved = [
+                  'you have been removed from the meeting',
+                  'you have been removed by the host',
+                  'the host has removed you from this meeting',
+                ].some((text) => terminalText.includes(text));
+                const meetingHasEnded = [
+                  'this meeting has been ended by host',
+                  'this meeting has ended',
+                  'meeting has been ended',
+                ].some((text) => terminalText.includes(text));
+
+                if (participantWasRemoved || meetingHasEnded) {
+                  console.log('Detected terminal Zoom meeting state; finalizing recording.', {
+                    userId,
+                    reason: participantWasRemoved ? 'participant_removed' : 'meeting_ended',
+                  });
+                  clearInterval(loneTest);
+                  monitor = false;
+                  void stopTheRecording();
+                  return;
+                }
+
                 // Detect and click blocking "OK" buttons
                 const okButton = Array.from(dom.querySelectorAll('button'))
                     .filter((el) => el?.innerText?.trim()?.match(/^OK/i));

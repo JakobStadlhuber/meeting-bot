@@ -1,23 +1,41 @@
-import { Browser, BrowserContext, Page } from 'playwright';
-import { chromium } from 'playwright-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { Browser, BrowserContext, BrowserContextOptions, Page, chromium } from 'playwright';
 import config from '../config';
 import { getCorrelationIdLog } from '../util/logger';
+import {
+  BrowserProvider,
+  closeBrowserSession,
+  getBrowserSession,
+  getValidatedProviderOrigin,
+  isExternalBrowserContext,
+  normalizeBrowserSessionError,
+  normalizeBrowserTimezone,
+  raceBrowserSessionFailure,
+  registerBrowserSession,
+} from './browserSession';
 
-const stealthPlugin = StealthPlugin();
-stealthPlugin.enabledEvasions.delete('iframe.contentWindow');
-stealthPlugin.enabledEvasions.delete('media.codecs');
-chromium.use(stealthPlugin);
+export type BotType = BrowserProvider;
 
-export type BotType = 'microsoft' | 'google' | 'zoom';
+export {
+  closeBrowserSession,
+  getBrowserSession,
+  getValidatedProviderOrigin,
+  isExternalBrowserContext,
+  normalizeBrowserSessionError,
+  normalizeBrowserTimezone,
+  raceBrowserSessionFailure,
+};
 
-const externalBrowserContexts = new WeakSet<BrowserContext>();
+const VIEWPORT_SIZE = { width: 1280, height: 720 };
+const WINDOW_SIZE = { width: 1280, height: 800 };
+const CDP_CONNECT_TIMEOUT_MS = 60_000;
+const CDP_RETRY_INTERVAL_MS = 1_000;
+const externalBrowserConnections = new Map<string, Promise<Browser>>();
 
-export function isExternalBrowserContext(context?: BrowserContext | null): boolean {
-  return Boolean(context && externalBrowserContexts.has(context));
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function resizeBrowserWindow(page: Page, size: { width: number; height: number }, correlationId: string) {
+async function resizeBrowserWindow(page: Page, correlationId: string): Promise<void> {
   const log = getCorrelationIdLog(correlationId);
 
   try {
@@ -29,306 +47,389 @@ async function resizeBrowserWindow(page: Page, size: { width: number; height: nu
         windowState: 'normal',
         left: 0,
         top: 0,
-        width: size.width,
-        height: size.height,
+        width: WINDOW_SIZE.width,
+        height: WINDOW_SIZE.height,
       },
     });
-  } catch (err: any) {
-    console.warn(`${log} Unable to resize Chrome window through CDP`, err?.message ?? err);
+  } catch (error) {
+    console.warn(`${log} Unable to resize Chrome window through CDP`, error instanceof Error ? error.message : error);
   }
 }
 
-function attachBrowserErrorHandlers(browser: Browser | null, context: BrowserContext, page: Page, correlationId: string) {
+async function applyPageEnvironment(page: Page, timezoneId: string, correlationId: string): Promise<void> {
   const log = getCorrelationIdLog(correlationId);
 
-  browser?.on('disconnected', () => {
-    console.log(`${log} Browser has disconnected!`);
-  });
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
-  context.on('close', () => {
-    console.log(`${log} Browser has closed!`);
-  });
-
-  page.on('crash', (page) => {
-    console.error(`${log} Page has crashed! ${page?.url()}`);
-  });
-
-  page.on('close', (page) => {
-    console.log(`${log} Page has closed! ${page?.url()}`);
-  });
+  try {
+    const client = await page.context().newCDPSession(page);
+    await client.send('Emulation.setLocaleOverride', { locale: 'en-US' });
+    await client.send('Emulation.setTimezoneOverride', { timezoneId });
+  } catch (error) {
+    console.warn(`${log} Unable to apply Chrome locale/timezone through CDP`, error instanceof Error ? error.message : error);
+  }
 }
 
-async function launchBrowserWithTimeout(launchFn: () => Promise<Browser>, timeoutMs: number, correlationId: string): Promise<Browser> {
-  let timeoutId: NodeJS.Timeout;
-  let finished = false;
-
-  return new Promise((resolve, reject) => {
-    // Set up timeout
-    timeoutId = setTimeout(() => {
-      if (!finished) {
-        finished = true;
-        reject(new Error(`Browser launch timed out after ${timeoutMs}ms`));
-      }
-    }, timeoutMs);
-
-    // Start launch
-    launchFn()
-      .then(result => {
-        if (!finished) {
-          finished = true;
-          clearTimeout(timeoutId);
-          console.log(`${getCorrelationIdLog(correlationId)} Browser launch function success!`);
-          resolve(result);
-        }
-      })
-      .catch(err => {
-        console.error(`${getCorrelationIdLog(correlationId)} Error launching browser`, err);
-        if (!finished) {
-          finished = true;
-          clearTimeout(timeoutId);
-          reject(err);
-        }
-      });
-  });
-}
-
-async function launchPersistentContextWithTimeout(launchFn: () => Promise<BrowserContext>, timeoutMs: number, correlationId: string): Promise<BrowserContext> {
+async function launchBrowserWithTimeout(
+  launchFn: () => Promise<Browser>,
+  timeoutMs: number,
+  correlationId: string,
+): Promise<Browser> {
   let timeoutId: NodeJS.Timeout;
   let finished = false;
 
   return new Promise((resolve, reject) => {
     timeoutId = setTimeout(() => {
-      if (!finished) {
-        finished = true;
-        reject(new Error(`Persistent browser launch timed out after ${timeoutMs}ms`));
-      }
+      if (finished) return;
+      finished = true;
+      reject(new Error(`Browser launch timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
     launchFn()
-      .then(result => {
-        if (!finished) {
-          finished = true;
-          clearTimeout(timeoutId);
-          console.log(`${getCorrelationIdLog(correlationId)} Persistent browser launch function success!`);
-          resolve(result);
+      .then(async browser => {
+        if (finished) {
+          await browser.close().catch(() => undefined);
+          return;
         }
+
+        finished = true;
+        clearTimeout(timeoutId);
+        console.log(`${getCorrelationIdLog(correlationId)} Browser launch function success!`);
+        resolve(browser);
       })
-      .catch(err => {
-        console.error(`${getCorrelationIdLog(correlationId)} Error launching persistent browser`, err);
-        if (!finished) {
-          finished = true;
-          clearTimeout(timeoutId);
-          reject(err);
-        }
+      .catch(error => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeoutId);
+        reject(error);
       });
   });
 }
 
-async function createBrowserContext(url: string, correlationId: string, botType: BotType = 'google'): Promise<Page> {
-  const size = { width: 1280, height: 720 };
-  const browserWindowSize = { width: size.width, height: size.height + 80 };
+async function launchPersistentContextWithTimeout(
+  launchFn: () => Promise<BrowserContext>,
+  timeoutMs: number,
+  correlationId: string,
+): Promise<BrowserContext> {
+  let timeoutId: NodeJS.Timeout;
+  let finished = false;
 
-  // Google Meet is sensitive to browser fingerprinting before admission. Keep
-  // its launch close to normal Chrome and reserve recording-heavy flags for
-  // platforms that need them.
-  const firstRunSuppressionArgs: string[] = [
+  return new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      reject(new Error(`Persistent browser launch timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    launchFn()
+      .then(async context => {
+        if (finished) {
+          await context.close().catch(() => undefined);
+          return;
+        }
+
+        finished = true;
+        clearTimeout(timeoutId);
+        console.log(`${getCorrelationIdLog(correlationId)} Persistent browser launch function success!`);
+        resolve(context);
+      })
+      .catch(error => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
+
+async function connectToExternalChrome(cdpUrl: string, correlationId: string): Promise<Browser> {
+  const existingConnection = externalBrowserConnections.get(cdpUrl);
+  if (existingConnection) {
+    const existingBrowser = await existingConnection.catch(() => undefined);
+    if (existingBrowser?.isConnected()) return existingBrowser;
+    externalBrowserConnections.delete(cdpUrl);
+  }
+
+  const connection = connectToExternalChromeWithRetry(cdpUrl, correlationId);
+  externalBrowserConnections.set(cdpUrl, connection);
+
+  try {
+    const browser = await connection;
+    browser.once('disconnected', () => {
+      if (externalBrowserConnections.get(cdpUrl) === connection) {
+        externalBrowserConnections.delete(cdpUrl);
+      }
+    });
+    return browser;
+  } catch (error) {
+    if (externalBrowserConnections.get(cdpUrl) === connection) {
+      externalBrowserConnections.delete(cdpUrl);
+    }
+    throw error;
+  }
+}
+
+async function connectToExternalChromeWithRetry(cdpUrl: string, correlationId: string): Promise<Browser> {
+  const startedAt = Date.now();
+  let lastError: unknown;
+  let attempt = 0;
+
+  while ((Date.now() - startedAt) < CDP_CONNECT_TIMEOUT_MS) {
+    attempt += 1;
+    const remainingMs = CDP_CONNECT_TIMEOUT_MS - (Date.now() - startedAt);
+
+    try {
+      return await chromium.connectOverCDP(cdpUrl, {
+        timeout: Math.max(1, Math.min(5_000, remainingMs)),
+      });
+    } catch (error) {
+      lastError = error;
+      console.warn(`${getCorrelationIdLog(correlationId)} External Chrome is not ready; retrying`, { attempt });
+      const retryDelayMs = Math.min(CDP_RETRY_INTERVAL_MS, CDP_CONNECT_TIMEOUT_MS - (Date.now() - startedAt));
+      if (retryDelayMs > 0) await delay(retryDelayMs);
+    }
+  }
+
+  const detail = lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error');
+  throw new Error(`Unable to connect to external Chrome within ${CDP_CONNECT_TIMEOUT_MS}ms: ${detail}`);
+}
+
+function getBrowserArgs(botType: BotType): string[] {
+  const args = [
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-first-run-ui',
     '--disable-default-browser-promo',
     '--disable-default-apps',
-  ];
-
-  const googleBrowserArgs: string[] = [
-    ...firstRunSuppressionArgs,
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    `--window-size=${browserWindowSize.width},${browserWindowSize.height}`,
+    '--lang=en-US',
+    `--window-size=${WINDOW_SIZE.width},${WINDOW_SIZE.height}`,
     '--auto-accept-this-tab-capture',
     '--autoplay-policy=no-user-gesture-required',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
   ];
 
-  const recordingBrowserArgs: string[] = [
-    ...firstRunSuppressionArgs,
-    '--enable-usermedia-screen-capturing',
-    '--allow-http-screen-capture',
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-web-security',
-    '--use-gl=angle',
-    '--use-angle=swiftshader',
-    `--window-size=${browserWindowSize.width},${browserWindowSize.height}`,
-    '--auto-accept-this-tab-capture',
-    '--enable-features=MediaRecorder',
-    '--enable-audio-service-out-of-process',
-    '--autoplay-policy=no-user-gesture-required',
-  ];
+  if (process.env.CHROME_NO_SANDBOX !== 'false') {
+    args.push('--no-sandbox', '--disable-setuid-sandbox');
+  }
 
-  // Fake device args - only for Microsoft Teams
-  // Teams needs fake devices to interact with pre-join screen toggles,
-  // but actual recording is done via ffmpeg (X11 + PulseAudio)
-  const fakeDeviceArgs: string[] = [
-    '--use-fake-ui-for-media-stream',
-    '--use-fake-device-for-media-stream',
-  ];
+  if (botType === 'microsoft') {
+    args.push('--use-fake-device-for-media-stream');
+  }
 
-  // Google Meet and Zoom use browser-based recording (getDisplayMedia + MediaRecorder)
-  // and don't need fake devices:
-  // - Google Meet: clicks "Continue without microphone and camera"
-  // - Zoom: expects "Cannot detect your camera/microphone" notifications
-  const browserArgs = botType === 'google'
-    ? googleBrowserArgs
-    : botType === 'microsoft'
-      ? [...recordingBrowserArgs, ...fakeDeviceArgs]
-      : recordingBrowserArgs;
-  const ignoreDefaultArgs = botType === 'google'
-    ? ['--mute-audio', '--enable-automation']
-    : ['--mute-audio'];
+  if (botType !== 'google' && process.env.CHROME_SOFTWARE_GL !== 'false') {
+    args.push('--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
+  }
 
-  // Teams-specific display args: kiosk mode prevents address bar from showing in ffmpeg recording
-  // Google Meet and Zoom don't need this since they use tab capture (getDisplayMedia)
-  const displayArgs = botType === 'microsoft'
-    ? ['--kiosk', '--start-maximized']
-    : [];
+  return args;
+}
 
-  console.log(`${getCorrelationIdLog(correlationId)} Launching browser for ${botType} bot (fake devices: ${botType === 'microsoft'})`);
+async function configurePage(
+  page: Page,
+  timezoneId: string,
+  correlationId: string,
+): Promise<void> {
+  await resizeBrowserWindow(page, correlationId);
+  await page.setViewportSize(VIEWPORT_SIZE);
+  await applyPageEnvironment(page, timezoneId, correlationId);
+}
 
-  const contextOptions = {
-    ...(botType !== 'google' ? {
-      permissions: ['camera', 'microphone'],
-    } : {}),
-    viewport: size,
-    ignoreHTTPSErrors: true,
-    // Record video only in development for debugging. Keep Google Meet's
-    // anonymous admission context close to a regular incognito tab.
+export async function cleanupFailedBrowserSetup({
+  browser,
+  context,
+  page,
+  closeBrowser,
+  closeContext,
+  correlationId,
+}: {
+  browser?: Browser | null;
+  context?: BrowserContext;
+  page?: Page;
+  closeBrowser: boolean;
+  closeContext: boolean;
+  correlationId: string;
+}): Promise<void> {
+  try {
+    const session = getBrowserSession(page);
+    if (session) {
+      await session.close();
+    } else if (closeBrowser && browser?.isConnected()) {
+      await browser.close();
+    } else if (closeContext && context) {
+      await context.close();
+    } else if (page && !page.isClosed()) {
+      await page.close();
+    }
+  } catch (cleanupError) {
+    console.warn(
+      `${getCorrelationIdLog(correlationId)} Failed to clean up partial browser setup`,
+      cleanupError instanceof Error ? cleanupError.message : cleanupError
+    );
+  }
+}
+
+async function createBrowserContext(
+  url: string,
+  correlationId: string,
+  botType: BotType = 'google',
+  timezone?: string,
+): Promise<Page> {
+  const log = getCorrelationIdLog(correlationId);
+  const trustedOrigin = getValidatedProviderOrigin(url, botType);
+  const timezoneId = normalizeBrowserTimezone(timezone);
+  const browserArgs = getBrowserArgs(botType);
+  const contextOptions: BrowserContextOptions = {
+    viewport: VIEWPORT_SIZE,
+    locale: 'en-US',
+    timezoneId,
     ...(process.env.NODE_ENV === 'development' && botType !== 'google' && {
       recordVideo: {
         dir: './debug-videos/',
-        size: size,
+        size: VIEWPORT_SIZE,
       },
     }),
   };
 
-  // External (already-running) Chrome via CDP. Supported for Google Meet and
-  // Zoom. Google reuses the browser's first context because it is tied to a
-  // logged-in profile/storageState; Zoom joins each meeting anonymously, so
-  // always spin up a fresh isolated context to avoid state bleeding between
-  // meetings (the /wc/join/ web client keeps IndexedDB/localStorage per origin).
-  const cdpUrl = botType === 'google' ? config.googleChromeCdpUrl
-    : botType === 'zoom' ? config.zoomChromeCdpUrl
-    : undefined;
+  if (timezone && timezoneId === 'UTC' && timezone !== 'UTC') {
+    console.warn(`${log} Invalid browser timezone; using UTC`);
+  }
+
+  console.log(`${log} Launching browser for ${botType} bot`);
+
+  const cdpUrl = botType === 'google'
+    ? config.googleChromeCdpUrl
+    : botType === 'zoom'
+      ? config.zoomChromeCdpUrl
+      : undefined;
 
   if (cdpUrl) {
-    console.log(`${getCorrelationIdLog(correlationId)} Connecting ${botType} bot to external Chrome`, {
-      cdpUrl,
-    });
+    console.log(`${log} Connecting ${botType} bot to external Chrome`);
+    const browser = await connectToExternalChrome(cdpUrl, correlationId);
+    let context: BrowserContext | undefined;
+    let page: Page | undefined;
+    let ownsContext = false;
 
-    const browser = await launchBrowserWithTimeout(
-      async () => await chromium.connectOverCDP(cdpUrl!),
-      60000,
-      correlationId
-    );
+    try {
+      const existingContext = botType === 'google' ? browser.contexts()[0] : undefined;
+      context = existingContext ?? await browser.newContext({
+        ...contextOptions,
+        ...(botType === 'google' && config.googleChromeStorageStatePath
+          ? { storageState: config.googleChromeStorageStatePath }
+          : {}),
+      });
+      ownsContext = !existingContext;
 
-    const context = botType === 'google'
-      ? (browser.contexts()[0] ?? await browser.newContext({
-          ...contextOptions,
-          ...(config.googleChromeStorageStatePath ? {
-            storageState: config.googleChromeStorageStatePath,
-          } : {}),
-        }))
-      : await browser.newContext(contextOptions);
-    externalBrowserContexts.add(context);
+      if (botType === 'microsoft') {
+        await context.grantPermissions(['microphone', 'camera'], { origin: trustedOrigin });
+      }
 
-    const page = await context.newPage();
-    await resizeBrowserWindow(page, browserWindowSize, correlationId);
-    await page.setViewportSize(size);
-    attachBrowserErrorHandlers(browser, context, page, correlationId);
+      page = await context.newPage();
+      registerBrowserSession(page, 'external-cdp', ownsContext, log);
+      await configurePage(page, timezoneId, correlationId);
 
-    // Parity with the non-CDP launch path: Zoom/Teams expect camera/mic grants
-    // for the pre-join audio check. Harmless if the web client doesn't use them.
-    if (botType !== 'google') {
-      await context.grantPermissions(['microphone', 'camera'], { origin: url });
+      console.log(`${log} External Chrome connected successfully!`);
+      return page;
+    } catch (error) {
+      const normalizedError = normalizeBrowserSessionError(page, error);
+      await cleanupFailedBrowserSetup({
+        browser,
+        context,
+        page,
+        closeBrowser: false,
+        closeContext: ownsContext,
+        correlationId,
+      });
+      throw normalizedError;
     }
-
-    console.log(`${getCorrelationIdLog(correlationId)} External Chrome connected successfully!`);
-
-    return page;
   }
 
   if (botType === 'google' && config.googleChromeUserDataDir) {
-    console.log(`${getCorrelationIdLog(correlationId)} Launching Google bot with persistent Chrome profile`, {
-      userDataDir: config.googleChromeUserDataDir,
-    });
-
+    console.log(`${log} Launching Google bot with persistent Chrome profile`);
     const context = await launchPersistentContextWithTimeout(
-      async () => await chromium.launchPersistentContext(config.googleChromeUserDataDir!, {
+      () => chromium.launchPersistentContext(config.googleChromeUserDataDir!, {
         ...contextOptions,
         headless: false,
         handleSIGINT: false,
         handleSIGTERM: false,
         handleSIGHUP: false,
-        args: [
-          ...browserArgs,
-          ...displayArgs,
-        ],
-        ignoreDefaultArgs,
+        args: browserArgs,
+        ignoreDefaultArgs: ['--mute-audio'],
         executablePath: config.chromeExecutablePath,
       }),
-      60000,
-      correlationId
+      60_000,
+      correlationId,
     );
+    let page: Page | undefined;
 
-    const page = context.pages()[0] ?? await context.newPage();
-    await resizeBrowserWindow(page, browserWindowSize, correlationId);
-    await page.setViewportSize(size);
-    attachBrowserErrorHandlers(context.browser(), context, page, correlationId);
+    try {
+      page = context.pages()[0] ?? await context.newPage();
+      registerBrowserSession(page, 'owned-persistent-context', true, log);
+      await configurePage(page, timezoneId, correlationId);
 
-    console.log(`${getCorrelationIdLog(correlationId)} Persistent browser launched successfully!`);
-
-    return page;
+      console.log(`${log} Persistent browser launched successfully!`);
+      return page;
+    } catch (error) {
+      const normalizedError = normalizeBrowserSessionError(page, error);
+      await cleanupFailedBrowserSetup({
+        browser: context.browser(),
+        context,
+        page,
+        closeBrowser: false,
+        closeContext: true,
+        correlationId,
+      });
+      throw normalizedError;
+    }
   }
 
   const browser = await launchBrowserWithTimeout(
-    async () => await chromium.launch({
+    () => chromium.launch({
       headless: false,
-      // Don't let Playwright install its own SIGTERM/SIGINT/SIGHUP handlers — they
-      // close the browser immediately when the node process receives a signal, which
-      // breaks our graceful shutdown (we want the in-flight recording to finish).
-      // The app explicitly calls browser.close() when the recording is done.
       handleSIGINT: false,
       handleSIGTERM: false,
       handleSIGHUP: false,
-      args: [
-        ...browserArgs,
-        ...displayArgs,
-      ],
-      ignoreDefaultArgs,
+      args: browserArgs,
+      ignoreDefaultArgs: ['--mute-audio'],
       executablePath: config.chromeExecutablePath,
     }),
-    60000,
-    correlationId
+    60_000,
+    correlationId,
   );
 
-  const context = await browser.newContext({
-    ...contextOptions,
-    ...(config.googleChromeStorageStatePath && botType === 'google' ? {
-      storageState: config.googleChromeStorageStatePath,
-    } : {}),
-  });
+  let context: BrowserContext | undefined;
+  let page: Page | undefined;
 
-  // Grant permissions so Teams will play audio (Teams requires this unlike Google Meet)
-  if (botType !== 'google') {
-    await context.grantPermissions(['microphone', 'camera'], { origin: url });
+  try {
+    context = await browser.newContext({
+      ...contextOptions,
+      ...(config.googleChromeStorageStatePath && botType === 'google'
+        ? { storageState: config.googleChromeStorageStatePath }
+        : {}),
+    });
+
+    if (botType === 'microsoft') {
+      await context.grantPermissions(['microphone', 'camera'], { origin: trustedOrigin });
+    }
+
+    page = await context.newPage();
+    registerBrowserSession(page, 'owned-browser', true, log);
+    await configurePage(page, timezoneId, correlationId);
+
+    console.log(`${log} Browser launched successfully!`);
+    return page;
+  } catch (error) {
+    const normalizedError = normalizeBrowserSessionError(page, error);
+    await cleanupFailedBrowserSetup({
+      browser,
+      context,
+      page,
+      closeBrowser: true,
+      closeContext: true,
+      correlationId,
+    });
+    throw normalizedError;
   }
-
-  const page = await context.newPage();
-
-  // Attach common error handlers
-  attachBrowserErrorHandlers(browser, context, page, correlationId);
-
-  console.log(`${getCorrelationIdLog(correlationId)} Browser launched successfully!`);
-
-  return page;
 }
 
 export default createBrowserContext;

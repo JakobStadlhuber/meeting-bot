@@ -6,13 +6,19 @@ import { KnownError } from '../error';
 import { BotStatus } from '../types';
 import { RtmsMediaRecorder } from './RtmsMediaRecorder';
 import { ZoomRtmsApi } from './ZoomRtmsApi';
+import { resolveZoomRtmsCredentials } from './ZoomRtmsCredentials';
 import { zoomRtmsEventStore } from './ZoomRtmsEventStore';
 import {
   assertZoomRtmsSdkAvailable,
   ZoomRtmsSdkClient,
   ZoomRtmsSdkConnectionIssue,
 } from './ZoomRtmsSdkClient';
-import { ZoomRtmsPayload, ZoomRtmsStopReason, ZoomRtmsWebhookEvent } from './types';
+import {
+  ZoomRtmsEventScope,
+  ZoomRtmsPayload,
+  ZoomRtmsStopReason,
+  ZoomRtmsWebhookEvent,
+} from './types';
 import { extractZoomMeetingId } from './utils';
 
 const START_EVENT_CLOCK_SKEW_MS = 5_000;
@@ -32,6 +38,11 @@ export const isTerminalSdkLeaveReason = (reason: number): boolean =>
   && reason <= LAST_KNOWN_STOP_REASON
   && !isTransientStopReason(reason);
 
+export const shouldRestartStoppedStream = (reason?: number): reason is number =>
+  typeof reason === 'number'
+  && reason !== ZoomRtmsStopReason.StreamRevoked
+  && !isTerminalSdkLeaveReason(reason);
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
@@ -39,8 +50,6 @@ const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export class ZoomRtmsTransport {
-  private readonly api = new ZoomRtmsApi();
-
   constructor(private readonly logger: Logger) {}
 
   async record(
@@ -48,6 +57,9 @@ export class ZoomRtmsTransport {
     pushState: (state: BotStatus) => void
   ): Promise<void> {
     const meetingId = extractZoomMeetingId(params.url);
+    const credentials = resolveZoomRtmsCredentials(params.teamId);
+    const eventScope = credentials.eventScope;
+    const api = new ZoomRtmsApi(credentials.api);
     let recorder: RtmsMediaRecorder | undefined;
     let client: ZoomRtmsSdkClient | undefined;
     let streamId: string | undefined;
@@ -82,7 +94,7 @@ export class ZoomRtmsTransport {
         meetingId,
         reservationOwnerId,
         reservationTtlSeconds,
-        config.zoomRtms.participantUserId
+        eventScope
       );
       if (!meetingReserved) {
         throw new KnownError(
@@ -95,8 +107,14 @@ export class ZoomRtmsTransport {
       this.logger.info('Requesting Zoom RTMS stream', { meetingId });
       const startRequestedAt = Date.now();
       const initialJoinDeadline = startRequestedAt + config.joinWaitTime * 60 * 1000;
-      rtmsRequested = true;
-      await this.api.start(meetingId, Math.max(0, initialJoinDeadline - Date.now()));
+      const startResult = await api.start(
+        meetingId,
+        Math.max(0, initialJoinDeadline - Date.now())
+      );
+      rtmsRequested = startResult.status === 'requested';
+      if (startResult.status === 'awaiting_external_authorization') {
+        this.logger.info('Waiting for external Zoom RTMS authorization', { meetingId });
+      }
       const initialEventWaitMs = initialJoinDeadline - Date.now();
       if (initialEventWaitMs <= 0) {
         throw new KnownError('Timed out requesting the Zoom RTMS stream', false, 0);
@@ -105,6 +123,7 @@ export class ZoomRtmsTransport {
       const startEvent = await this.waitForFreshStart(
         meetingId,
         startRequestedAt,
+        eventScope,
         Math.ceil(initialEventWaitMs / 1000)
       );
       if (!startEvent) {
@@ -113,7 +132,8 @@ export class ZoomRtmsTransport {
 
       streamId = startEvent.payload.rtms_stream_id;
       lastStartPayload = startEvent.payload;
-      await zoomRtmsEventStore.markStreamActive(streamId);
+      rtmsRequested = true;
+      await zoomRtmsEventStore.markStreamActive(streamId, eventScope);
       client = new ZoomRtmsSdkClient(recorder, this.logger);
       await this.connectWithBackoff(
         client,
@@ -147,18 +167,23 @@ export class ZoomRtmsTransport {
           maxAttempts: MAX_STREAM_RESTARTS,
         });
         await activeClient.close();
-        await zoomRtmsEventStore.markStreamInactive(stoppedStreamId);
+        await zoomRtmsEventStore.markStreamInactive(stoppedStreamId, eventScope);
 
         const restartRequestedAt = Date.now();
         const restartJoinDeadline = Math.min(
           recordingDeadline,
           restartRequestedAt + config.joinWaitTime * 60 * 1000
         );
-        rtmsRequested = true;
-        await this.api.start(
+        const restartResult = await api.start(
           meetingId,
           Math.max(0, restartJoinDeadline - Date.now())
         );
+        rtmsRequested = restartResult.status === 'requested';
+        if (restartResult.status === 'awaiting_external_authorization') {
+          this.logger.info('Waiting for external Zoom RTMS restart authorization', {
+            meetingId,
+          });
+        }
         const restartEventWaitMs = restartJoinDeadline - Date.now();
         if (restartEventWaitMs <= 0) {
           throw new Error('Timed out requesting the Zoom RTMS stream restart');
@@ -166,6 +191,7 @@ export class ZoomRtmsTransport {
         const restartedEvent = await this.waitForFreshStart(
           meetingId,
           restartRequestedAt,
+          eventScope,
           Math.ceil(restartEventWaitMs / 1000)
         );
         if (!restartedEvent) {
@@ -174,7 +200,8 @@ export class ZoomRtmsTransport {
 
         streamId = restartedEvent.payload.rtms_stream_id;
         lastStartPayload = restartedEvent.payload;
-        await zoomRtmsEventStore.markStreamActive(streamId);
+        rtmsRequested = true;
+        await zoomRtmsEventStore.markStreamActive(streamId, eventScope);
         await this.connectWithBackoff(
           activeClient,
           lastStartPayload,
@@ -194,11 +221,15 @@ export class ZoomRtmsTransport {
 
         const event = await zoomRtmsEventStore.waitForStreamEvent(
           streamId,
+          eventScope,
           Math.min(STREAM_EVENT_POLL_SECONDS, remainingSeconds)
         );
 
         if (event?.event === 'meeting.rtms_stopped') {
           rtmsRequested = false;
+          if (typeof event.payload.stop_reason !== 'number') {
+            throw new KnownError('Zoom RTMS stop event is missing its reason', false, 0);
+          }
           if (event.payload.stop_reason === ZoomRtmsStopReason.StreamRevoked) {
             throw new KnownError(
               'Zoom RTMS consent was revoked; the recording was discarded',
@@ -207,7 +238,7 @@ export class ZoomRtmsTransport {
             );
           }
 
-          if (isTransientStopReason(event.payload.stop_reason)) {
+          if (shouldRestartStoppedStream(event.payload.stop_reason)) {
             await restartTerminatedStream(event.payload.stop_reason);
             continue;
           }
@@ -313,7 +344,7 @@ export class ZoomRtmsTransport {
           meetingId,
           streamId,
         });
-        await this.api.stop(meetingId);
+        await api.stop(meetingId);
         rtmsRequested = false;
       }
 
@@ -337,12 +368,12 @@ export class ZoomRtmsTransport {
     } finally {
       await client?.close();
       if (streamId) {
-        await zoomRtmsEventStore.markStreamInactive(streamId).catch((error) => {
+        await zoomRtmsEventStore.markStreamInactive(streamId, eventScope).catch((error) => {
           this.logger.warn('Unable to release Zoom RTMS stream ownership', { error, streamId });
         });
       }
       if (rtmsRequested && !terminalStopReceived) {
-        await this.api.stop(meetingId).catch((error) => {
+        await api.stop(meetingId).catch((error) => {
           this.logger.warn('Unable to stop Zoom RTMS during cleanup', { error, meetingId });
         });
       }
@@ -353,7 +384,7 @@ export class ZoomRtmsTransport {
         await zoomRtmsEventStore.releaseMeeting(
           meetingId,
           reservationOwnerId,
-          config.zoomRtms.participantUserId
+          eventScope
         ).catch((error) => {
           this.logger.warn('Unable to release Zoom RTMS meeting reservation', {
             error,
@@ -367,6 +398,7 @@ export class ZoomRtmsTransport {
   private async waitForFreshStart(
     meetingId: string,
     requestedAt: number,
+    eventScope: ZoomRtmsEventScope,
     timeoutSeconds: number
   ): Promise<ZoomRtmsWebhookEvent | null> {
     const deadline = Date.now() + Math.max(1, timeoutSeconds) * 1000;
@@ -374,6 +406,7 @@ export class ZoomRtmsTransport {
     while (Date.now() < deadline) {
       const event = await zoomRtmsEventStore.waitForMeetingStart(
         meetingId,
+        eventScope,
         Math.max(1, Math.ceil((deadline - Date.now()) / 1000))
       );
       if (!event) return null;
@@ -392,7 +425,7 @@ export class ZoomRtmsTransport {
         continue;
       }
 
-      const expectedOperatorId = config.zoomRtms.participantUserId;
+      const expectedOperatorId = eventScope.operatorId;
       if (
         expectedOperatorId
         && String(event.payload.operator_id ?? '') !== expectedOperatorId

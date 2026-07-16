@@ -71,6 +71,10 @@ services:
       context: .
       dockerfile: Dockerfile.chrome-cdp
     shm_size: "1gb"
+    environment:
+      # Compose uses a separate container network; Kubernetes keeps the default
+      # loopback-only binding because app and sidecar share one pod network.
+      CHROME_CDP_PROXY_ADDRESS: "0.0.0.0"
     expose:
       - "9223"
     healthcheck:

@@ -29,3 +29,23 @@ export interface ZoomWebhookBody {
   event_ts?: number;
   payload?: Record<string, unknown>;
 }
+
+export interface ZoomRtmsApiCredentials {
+  source: 'customer' | 'legacy';
+  customerId: string;
+  rtmsClientId: string;
+  participantUserId?: string;
+  oauthAccessToken?: string;
+  oauthAccountId?: string;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+}
+
+export interface ZoomRtmsEventScope {
+  customerId: string;
+  operatorId?: string;
+}
+
+export type ZoomRtmsStartResult =
+  | { status: 'requested' }
+  | { status: 'awaiting_external_authorization'; httpStatus: 403 };
