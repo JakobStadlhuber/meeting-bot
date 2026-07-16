@@ -18,6 +18,7 @@ export const classifyZoomJoinState = (bodyText?: string | null): ZoomJoinState =
   if (
     /automated bots? (?:are not|aren't) allowed to join/.test(text)
     || /this meeting (?:does not|doesn't) allow automated bots?/.test(text)
+    || text.includes('zoom needs to review the security of your connection before proceeding')
   ) {
     return 'automated_bot_blocked';
   }

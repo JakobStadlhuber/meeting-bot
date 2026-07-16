@@ -3,9 +3,13 @@ import test from 'node:test';
 import { ZoomBrowserJoinBlockedError } from '../error';
 import { classifyZoomJoinState, shouldUseZoomRtmsFallback } from './zoomJoinState';
 
-test('classifies only an explicit Zoom automated-bot rejection as bot blocked', () => {
+test('classifies explicit Zoom browser-security blocks as bot blocked', () => {
   assert.equal(
     classifyZoomJoinState('Automated bots aren\'t allowed to join this meeting. Sign in to join.'),
+    'automated_bot_blocked'
+  );
+  assert.equal(
+    classifyZoomJoinState('Zoom needs to review the security of your connection before proceeding.'),
     'automated_bot_blocked'
   );
   assert.equal(classifyZoomJoinState('Sign in to join this meeting'), 'sign_in_required');

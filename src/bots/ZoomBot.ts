@@ -24,6 +24,7 @@ import {
   ZoomJoinState,
 } from './zoomJoinState';
 import { reportRecoveredZoomFallback } from '../monitoring/sentry';
+import { dismissZoomOptionalMediaPrompt } from './zoomPrejoinModal';
 
 class BotBase extends AbstractMeetBot {
   protected page: Page;
@@ -408,10 +409,15 @@ export class ZoomBot extends BotBase {
     this._logger.info('Waiting for the input field to be visible...');
     await iframe.waitForSelector('input[type="text"]', { timeout: 60000 });
 
+    if (await dismissZoomOptionalMediaPrompt(iframe)) {
+      this._logger.info('Continuing Zoom pre-join without microphone and camera...');
+    }
+
     this._logger.info('Filling the input field with the name...');
-    await iframe.fill('input[type="text"]', name ? name : 'ScreenApp Notetaker');
+    await iframe.fill('input[type="text"]', name ? name : 'winkk AI Notetaker');
 
     this._logger.info('Clicking the "Join" button...');
+    await dismissZoomOptionalMediaPrompt(iframe, 500);
     const joinButton = iframe.locator('button', { hasText: 'Join' }).first();
     await joinButton.waitFor({ timeout: 15000 });
     await joinButton.click();
