@@ -28,6 +28,8 @@ export async function dismissZoomOptionalMediaPrompt(
   if (!await continueWithoutMedia.isVisible({ timeout: 1_000 }).catch(() => false)) return false;
 
   await continueWithoutMedia.click();
-  await prompt.waitFor({ state: 'hidden', timeout: 5_000 });
-  return true;
+  return await continueWithoutMedia
+    .waitFor({ state: 'hidden', timeout: 5_000 })
+    .then(() => true)
+    .catch(() => false);
 }
