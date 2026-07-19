@@ -1,5 +1,6 @@
 import { Browser, BrowserContext, BrowserContextOptions, Page, chromium } from 'playwright';
 import config from '../config';
+import { ZoomBrowserProfileConfigurationError } from '../error';
 import { getCorrelationIdLog } from '../util/logger';
 import {
   BrowserProvider,
@@ -52,7 +53,7 @@ async function resizeBrowserWindow(page: Page, correlationId: string): Promise<v
       },
     });
   } catch (error) {
-    console.warn(`${log} Unable to resize Chrome window through CDP`, error instanceof Error ? error.message : error);
+    console.warn('%s Unable to resize Chrome window through CDP', log, error instanceof Error ? error.message : error);
   }
 }
 
@@ -66,7 +67,7 @@ async function applyPageEnvironment(page: Page, timezoneId: string, correlationI
     await client.send('Emulation.setLocaleOverride', { locale: 'en-US' });
     await client.send('Emulation.setTimezoneOverride', { timezoneId });
   } catch (error) {
-    console.warn(`${log} Unable to apply Chrome locale/timezone through CDP`, error instanceof Error ? error.message : error);
+    console.warn('%s Unable to apply Chrome locale/timezone through CDP', log, error instanceof Error ? error.message : error);
   }
 }
 
@@ -184,7 +185,7 @@ async function connectToExternalChromeWithRetry(cdpUrl: string, correlationId: s
       });
     } catch (error) {
       lastError = error;
-      console.warn(`${getCorrelationIdLog(correlationId)} External Chrome is not ready; retrying`, { attempt });
+      console.warn('%s External Chrome is not ready; retrying', getCorrelationIdLog(correlationId), { attempt });
       const retryDelayMs = Math.min(CDP_RETRY_INTERVAL_MS, CDP_CONNECT_TIMEOUT_MS - (Date.now() - startedAt));
       if (retryDelayMs > 0) await delay(retryDelayMs);
     }
@@ -194,10 +195,29 @@ async function connectToExternalChromeWithRetry(cdpUrl: string, correlationId: s
   throw new Error(`Unable to connect to external Chrome within ${CDP_CONNECT_TIMEOUT_MS}ms: ${detail}`);
 }
 
+export function selectZoomChromeStorageStatePath(
+  teamId: string | undefined,
+  customerPaths: Record<string, string>,
+): string | undefined {
+  if (!teamId || !Object.prototype.hasOwnProperty.call(customerPaths, teamId)) return undefined;
+  return customerPaths[teamId];
+}
 
-function getStorageStatePath(botType: BotType): string | undefined {
+export function getStorageStatePath(botType: BotType, teamId?: string): string | undefined {
   if (botType === 'google') return config.googleChromeStorageStatePath;
-  if (botType === 'zoom') return config.zoomChromeStorageStatePath;
+  if (botType === 'zoom') {
+    if (!teamId) return undefined;
+    if (
+      config.zoomChromeCustomerStorageStatePathsError
+      || config.zoomChromeCustomerStorageStatePathErrors[teamId]
+    ) {
+      throw new ZoomBrowserProfileConfigurationError(teamId);
+    }
+    return selectZoomChromeStorageStatePath(
+      teamId,
+      config.zoomChromeCustomerStorageStatePaths,
+    );
+  }
   return undefined;
 }
 
@@ -298,7 +318,8 @@ export async function cleanupFailedBrowserSetup({
     }
   } catch (cleanupError) {
     console.warn(
-      `${getCorrelationIdLog(correlationId)} Failed to clean up partial browser setup`,
+      '%s Failed to clean up partial browser setup',
+      getCorrelationIdLog(correlationId),
       cleanupError instanceof Error ? cleanupError.message : cleanupError
     );
   }
@@ -309,11 +330,13 @@ async function createBrowserContext(
   correlationId: string,
   botType: BotType = 'google',
   timezone?: string,
+  teamId?: string,
 ): Promise<Page> {
   const log = getCorrelationIdLog(correlationId);
   const trustedOrigin = getValidatedProviderOrigin(url, botType);
   const timezoneId = normalizeBrowserTimezone(timezone);
   const browserArgs = getBrowserArgs(botType);
+  const storageStatePath = getStorageStatePath(botType, teamId);
   const contextOptions: BrowserContextOptions = {
     viewport: VIEWPORT_SIZE,
     locale: 'en-US',
@@ -349,8 +372,8 @@ async function createBrowserContext(
       const existingContext = botType === 'google' ? browser.contexts()[0] : undefined;
       context = existingContext ?? await browser.newContext({
         ...contextOptions,
-        ...(getStorageStatePath(botType)
-          ? { storageState: getStorageStatePath(botType) }
+        ...(storageStatePath
+          ? { storageState: storageStatePath }
           : {}),
       });
       ownsContext = !existingContext;
@@ -438,8 +461,8 @@ async function createBrowserContext(
   try {
     context = await browser.newContext({
       ...contextOptions,
-      ...(getStorageStatePath(botType)
-        ? { storageState: getStorageStatePath(botType) }
+      ...(storageStatePath
+        ? { storageState: storageStatePath }
         : {}),
     });
 

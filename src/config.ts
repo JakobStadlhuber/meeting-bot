@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import path from 'node:path';
 import { UploaderType } from './types';
 dotenv.config();
 
@@ -29,6 +30,12 @@ export interface ZoomRtmsCustomerCredentials {
 
 export interface ZoomRtmsCustomerCredentialsParseResult {
   credentials: Record<string, ZoomRtmsCustomerCredentials>;
+  entryErrors: Record<string, string>;
+  error?: string;
+}
+
+export interface ZoomChromeCustomerStorageStatePathsParseResult {
+  paths: Record<string, string>;
   entryErrors: Record<string, string>;
   error?: string;
 }
@@ -95,6 +102,69 @@ export const parseZoomRtmsCustomerCredentials = (
   return { credentials, entryErrors };
 };
 
+export const parseZoomChromeCustomerStorageStatePaths = (
+  rawValue?: string
+): ZoomChromeCustomerStorageStatePathsParseResult => {
+  const paths: Record<string, string> = Object.create(null);
+  const entryErrors: Record<string, string> = Object.create(null);
+  const teamByPath = new Map<string, string>();
+  if (!rawValue?.trim()) return { paths, entryErrors };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawValue);
+  } catch {
+    return {
+      paths,
+      entryErrors,
+      error: 'ZOOM_CHROME_CUSTOMER_STORAGE_STATE_PATHS_JSON must contain valid JSON',
+    };
+  }
+
+  if (!isPlainObject(parsed)) {
+    return {
+      paths,
+      entryErrors,
+      error: 'ZOOM_CHROME_CUSTOMER_STORAGE_STATE_PATHS_JSON must be an object keyed by teamId',
+    };
+  }
+
+  for (const [teamId, value] of Object.entries(parsed)) {
+    if (
+      !teamId
+      || teamId.trim() !== teamId
+      || teamId.length > 256
+      || /[\u0000-\u001f\u007f]/.test(teamId)
+    ) {
+      entryErrors[teamId] = 'teamId is invalid';
+      continue;
+    }
+
+    if (
+      typeof value !== 'string'
+      || value.trim() !== value
+      || value.includes('\0')
+      || !path.isAbsolute(value)
+    ) {
+      entryErrors[teamId] = 'storage state path must be an absolute path';
+      continue;
+    }
+
+    const existingTeamId = teamByPath.get(value);
+    if (existingTeamId) {
+      delete paths[existingTeamId];
+      entryErrors[existingTeamId] = 'storage state path must be unique per teamId';
+      entryErrors[teamId] = 'storage state path must be unique per teamId';
+      continue;
+    }
+
+    teamByPath.set(value, teamId);
+    paths[teamId] = value;
+  }
+
+  return { paths, entryErrors };
+};
+
 const requiredSettings = [
   'GCP_DEFAULT_REGION',
   'GCP_MISC_BUCKET',
@@ -146,6 +216,9 @@ if (!Number.isFinite(zoomRtmsEventTtlSeconds) || zoomRtmsEventTtlSeconds <= 0) {
 const zoomRtmsCustomerCredentials = parseZoomRtmsCustomerCredentials(
   process.env.ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON
 );
+const zoomChromeCustomerStorageStatePaths = parseZoomChromeCustomerStorageStatePaths(
+  process.env.ZOOM_CHROME_CUSTOMER_STORAGE_STATE_PATHS_JSON
+);
 
 export default {
   port: process.env.PORT || 3000,
@@ -163,7 +236,9 @@ export default {
   googleChromeUserDataDir: process.env.GOOGLE_CHROME_USER_DATA_DIR,
   googleChromeStorageStatePath: process.env.GOOGLE_CHROME_STORAGE_STATE_PATH,
   zoomChromeCdpUrl: process.env.ZOOM_CHROME_CDP_URL,
-  zoomChromeStorageStatePath: process.env.ZOOM_CHROME_STORAGE_STATE_PATH,
+  zoomChromeCustomerStorageStatePaths: zoomChromeCustomerStorageStatePaths.paths,
+  zoomChromeCustomerStorageStatePathErrors: zoomChromeCustomerStorageStatePaths.entryErrors,
+  zoomChromeCustomerStorageStatePathsError: zoomChromeCustomerStorageStatePaths.error,
   zoomRecordingTransport: zoomRecordingTransport as 'browser' | 'rtms',
   zoomRtmsFallbackEnabled: process.env.ZOOM_RTMS_FALLBACK_ENABLED === 'true',
   zoomRtms: {

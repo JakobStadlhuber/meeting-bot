@@ -108,7 +108,7 @@ export const createCorrelationId = ({
     const entityId = botId ?? eventId;
     const name = `${userId}:${entityId}:${url}`;
     const id = uuidv5(name, NAMESPACE);
-    console.log(`[correlationId:${id}]`, {
+    console.log('[correlationId:%s]', id, {
       correlationId: id,
       userId,
       eventId,
@@ -121,7 +121,7 @@ export const createCorrelationId = ({
   } catch(err) {
     console.error('Unable to create deterministic correlationId', { userId, teamId, err });
     const id = v4();
-    console.log(`[correlationId:${id}]`, {
+    console.log('[correlationId:%s]', id, {
       correlationId: id,
       userId,
       eventId,

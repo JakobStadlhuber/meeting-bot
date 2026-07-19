@@ -17,11 +17,29 @@ import { getStorageProvider } from '../uploader/providers/factory';
 import { getTimeString } from '../lib/datetime';
 import { notifyRecordingCompleted, RecordingCompletedPayload } from '../services/notificationService';
 import { writeWebmDurationMetadata } from '../lib/webmDuration';
+import { encodeFileNameSafebase64 } from '../util/strings';
 
 console.log(' ----- PWD OR CWD ----- ', process.cwd());
 
 const tempFolder = path.join(process.cwd(), 'dist', '_tempvideo');
 const execFileAsync = promisify(execFile);
+const SAFE_FILE_COMPONENT = /^[A-Za-z0-9_-]+$/;
+const SAFE_FILE_EXTENSION = /^\.[A-Za-z0-9]+$/;
+
+export function assertSafeFileComponent(value: string, label: string): void {
+  if (!value || !SAFE_FILE_COMPONENT.test(value)) {
+    throw new Error(`Invalid ${label} for temporary recording path`);
+  }
+}
+
+export function assertPathWithinTempFolder(filePath: string): string {
+  const root = path.resolve(tempFolder);
+  const resolved = path.resolve(filePath); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error('Temporary recording path escapes its isolated directory');
+  }
+  return resolved;
+}
 
 function isNoSuchUploadError(err: any, userId: string, logger: Logger): boolean {
   /**
@@ -337,8 +355,10 @@ class DiskUploader implements IUploader {
       this._tempFileId,
       normalizedExtension
     );
-    const sourcePath = path.resolve(filePath);
-    const resolvedTarget = path.resolve(targetPath);
+    // `filePath` is produced by the internal RTMS recorder; still enforce the
+    // temporary-media boundary before moving it into the uploader location.
+    const sourcePath = assertPathWithinTempFolder(filePath);
+    const resolvedTarget = assertPathWithinTempFolder(targetPath);
 
     if (sourcePath !== resolvedTarget) {
       await fs.promises.unlink(resolvedTarget).catch((error: NodeJS.ErrnoException) => {
@@ -383,15 +403,21 @@ class DiskUploader implements IUploader {
   }
 
   private static getFolderPath(userId: string) {
-    const folderPath = path.join(tempFolder, userId);
+    const safeUserId = encodeFileNameSafebase64(userId);
+    assertSafeFileComponent(safeUserId, 'userId');
+    const folderPath = path.join(tempFolder, safeUserId); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
     return folderPath;
   }
 
   private static getFilePath(userId: string, tempFileId: string, fileExtension: string) {
+    assertSafeFileComponent(tempFileId, 'temporary file ID');
+    if (!SAFE_FILE_EXTENSION.test(fileExtension)) {
+      throw new Error('Invalid temporary recording file extension');
+    }
     const fileName = `${tempFileId}${fileExtension}`;
     const folderPath = DiskUploader.getFolderPath(userId);
-    const filePath = path.join(folderPath, fileName);
-    return filePath;
+    const filePath = path.join(folderPath, fileName); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+    return assertPathWithinTempFolder(filePath);
   }
 
   private async processRecordingUpload() {

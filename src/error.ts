@@ -49,6 +49,16 @@ export class ZoomBrowserJoinBlockedError extends KnownError {
   }
 }
 
+export class ZoomBrowserProfileConfigurationError extends KnownError {
+  public readonly teamId: string;
+
+  constructor(teamId: string) {
+    super(`Zoom browser profile configuration is invalid for team ${teamId}`, false, 0);
+    this.name = 'ZoomBrowserProfileConfigurationError';
+    this.teamId = teamId;
+  }
+}
+
 export type ZoomMeetingJoinFailureReason =
   | 'host_rejected'
   | 'sign_in_required'

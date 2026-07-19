@@ -168,7 +168,13 @@ export class ZoomBot extends BotBase {
   private async joinMeeting({ pushState, ...params }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
     this.joinState = 'prejoin';
     this._logger.info('Launching browser for Zoom...', { userId: params.userId });
-    this.page = await createBrowserContext(params.url, this._correlationId, 'zoom', params.timezone);
+    this.page = await createBrowserContext(
+      params.url,
+      this._correlationId,
+      'zoom',
+      params.timezone,
+      params.teamId,
+    );
     const browserSession = getBrowserSession(this.page);
     const joinWork = this.joinMeetingInBrowser({ ...params, pushState });
 
