@@ -100,6 +100,34 @@ test('parses complete dedicated RTMS app credentials', () => {
   assert.deepEqual({ ...parsed.entryErrors }, {});
 });
 
+test('enforces the configured customer credential mode', () => {
+  const dedicated = {
+    ...customer(),
+    rtmsApp: {
+      webhookId: 'customer-app-a',
+      clientId: 'dedicated-rtms-client',
+      clientSecret: 'dedicated-rtms-secret',
+      webhookSecret: 'dedicated-webhook-secret',
+    },
+  };
+
+  const dedicatedOnly = parseZoomRtmsCustomerCredentials(JSON.stringify({
+    shared: customer(),
+    dedicated,
+  }), 'dedicated_customer');
+  assert.equal(dedicatedOnly.credentials.shared, undefined);
+  assert.deepEqual({ ...dedicatedOnly.credentials.dedicated }, dedicated);
+  assert.match(dedicatedOnly.entryErrors.shared, /rtmsApp is required/);
+
+  const sharedOnly = parseZoomRtmsCustomerCredentials(JSON.stringify({
+    shared: customer(),
+    dedicated,
+  }), 'shared_customer');
+  assert.deepEqual({ ...sharedOnly.credentials.shared }, customer());
+  assert.equal(sharedOnly.credentials.dedicated, undefined);
+  assert.match(sharedOnly.entryErrors.dedicated, /rtmsApp is not allowed/);
+});
+
 test('rejects partial, unsafe, and duplicate dedicated app settings without leaking secrets', () => {
   const secret = 'must-never-appear';
   const parsed = parseZoomRtmsCustomerCredentials(JSON.stringify({

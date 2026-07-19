@@ -32,6 +32,11 @@ export interface ZoomRtmsCustomerCredentials {
   rtmsApp?: ZoomRtmsCustomerAppCredentials;
 }
 
+export type ZoomRtmsCustomerCredentialMode =
+  | 'auto'
+  | 'shared_customer'
+  | 'dedicated_customer';
+
 export interface ZoomRtmsCustomerAppCredentials {
   webhookId: string;
   clientId: string;
@@ -67,7 +72,8 @@ const isValidWebhookId = (value: string): boolean =>
   && value !== 'global';
 
 export const parseZoomRtmsCustomerCredentials = (
-  rawValue?: string
+  rawValue?: string,
+  credentialMode: ZoomRtmsCustomerCredentialMode = 'auto'
 ): ZoomRtmsCustomerCredentialsParseResult => {
   const credentials: Record<string, ZoomRtmsCustomerCredentials> = Object.create(null);
   const entryErrors: Record<string, string> = Object.create(null);
@@ -137,6 +143,11 @@ export const parseZoomRtmsCustomerCredentials = (
         continue;
       }
 
+      if (credentialMode === 'shared_customer') {
+        entryErrors[teamId] = 'rtmsApp is not allowed in shared_customer mode';
+        continue;
+      }
+
       const webhookId = value.rtmsApp.webhookId as string;
       const existingTeamId = teamByWebhookId.get(webhookId);
       if (existingTeamId) {
@@ -153,6 +164,11 @@ export const parseZoomRtmsCustomerCredentials = (
         clientSecret: (value.rtmsApp.clientSecret as string).trim(),
         webhookSecret: (value.rtmsApp.webhookSecret as string).trim(),
       };
+    }
+
+    if (credentialMode === 'dedicated_customer' && !rtmsApp) {
+      entryErrors[teamId] = 'rtmsApp is required in dedicated_customer mode';
+      continue;
     }
 
     credentials[teamId] = {
@@ -298,8 +314,17 @@ if (!Number.isFinite(zoomRtmsEventTtlSeconds) || zoomRtmsEventTtlSeconds <= 0) {
   throw new Error('ZOOM_RTMS_EVENT_TTL_SECONDS must be a positive number');
 }
 
+const zoomRtmsCustomerCredentialMode =
+  process.env.ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE ?? 'auto';
+if (!['auto', 'shared_customer', 'dedicated_customer'].includes(zoomRtmsCustomerCredentialMode)) {
+  throw new Error(
+    'ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE must be auto, shared_customer or dedicated_customer'
+  );
+}
+
 const zoomRtmsCustomerCredentials = parseZoomRtmsCustomerCredentials(
-  process.env.ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON
+  process.env.ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON,
+  zoomRtmsCustomerCredentialMode as ZoomRtmsCustomerCredentialMode
 );
 const zoomRtmsGlobalTeamId = process.env.ZOOM_RTMS_GLOBAL_TEAM_ID;
 if (
@@ -350,6 +375,7 @@ export default {
     participantUserId: process.env.ZOOM_RTMS_PARTICIPANT_USER_ID,
     globalTeamId: zoomRtmsGlobalTeamId,
     eventTtlSeconds: zoomRtmsEventTtlSeconds,
+    customerCredentialMode: zoomRtmsCustomerCredentialMode as ZoomRtmsCustomerCredentialMode,
     customerCredentials: zoomRtmsCustomerCredentials.credentials,
     customerCredentialErrors: zoomRtmsCustomerCredentials.entryErrors,
     customerCredentialsError: zoomRtmsCustomerCredentials.error,

@@ -127,6 +127,7 @@ For browser-first customer fallback:
 ```env
 ZOOM_RECORDING_TRANSPORT=browser
 ZOOM_RTMS_FALLBACK_ENABLED=true
+ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE=shared_customer
 ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON={...}
 ```
 
@@ -137,6 +138,77 @@ For RTMS first, set `ZOOM_RECORDING_TRANSPORT=rtms`. Enabled exact customer mapp
 ## Mode C: dedicated private app per customer
 
 Use this mode when each customer creates and pays for its own private Zoom General RTMS app and S2S OAuth app. The app stays local to that customer's Zoom account and does not depend on publication of the shared Winkk app.
+
+### Customer setup
+
+Complete these steps while signed in to the Zoom account that will own and pay for the RTMS usage. Repeat the complete setup for every customer account and for every environment that needs separate credentials.
+
+#### 1. Create the private General RTMS app
+
+1. Open [Build an app in Zoom App Marketplace](https://marketplace.zoom.us/develop/create), select **General App**, and create the app. Zoom's detailed instructions are in [Create an OAuth app](https://developers.zoom.us/docs/integrations/create/).
+2. Name it for the owning account, for example `winkk AI Notetaker - Customer Name`.
+3. Under **Basic Information**, select **User-managed**. Zoom requires an RTMS app to be user-managed.
+4. Keep the app private: do not submit it for Marketplace publication. For an unpublished same-account app, use the **Development** credentials and install it from **Local Test** with **Add App Now**, then **Allow**. Local-test access is limited to members of that Zoom account.
+5. Under **Access**, enable **Event Subscription** and add exactly these meeting events:
+   - `meeting.rtms_started`
+   - `meeting.rtms_stopped`
+   - `meeting.rtms_interrupted`
+6. Set the event notification endpoint to one unique dedicated webhook URL:
+
+   ```text
+   Production: https://rtms.winkk.ai/zoom/rtms/webhook/apps/<webhookId>
+   Development: https://dev.rtms.winkk.ai/zoom/rtms/webhook/apps/<webhookId>
+   ```
+
+   Choose `<webhookId>` once for this customer and environment. It may contain only letters, numbers, `_`, and `-`, must be unique across all customer entries, and must not be `global`. Zoom validates this public HTTPS endpoint when the subscription is saved.
+7. Under **Scopes**, add:
+   - `meeting:read:meeting_audio`
+   - `meeting:read:meeting_video`
+8. Copy the following values without posting them in chat or source control:
+   - **Client ID** from the General app's Development credentials
+   - **Client Secret** from the same credential set
+   - **Secret Token** from **Access**; this is the webhook secret and is not the Client Secret
+
+See [Add Realtime Media Streams to your app](https://developers.zoom.us/docs/rtms/meetings/add-features/) for Zoom's current RTMS event, scope, and user-managed-app requirements.
+
+#### 2. Create the private Server-to-Server OAuth control app
+
+1. Open [Build an app in Zoom App Marketplace](https://marketplace.zoom.us/develop/create), select **Server-to-Server OAuth App**, and create it. Follow Zoom's [Server-to-Server OAuth app guide](https://developers.zoom.us/docs/internal-apps/create/).
+2. Name it for the owning account, for example `winkk AI Notetaker Control - Customer Name`.
+3. Complete the required app information.
+4. Add exactly this required granular scope:
+
+   ```text
+   meeting:update:participant_rtms_app_status:admin
+   ```
+
+   If the onboarding process must look up the participant's Zoom user ID from their email, also add `user:read:user:admin` and use Zoom's [Get a user API](https://developers.zoom.us/docs/api/users/#tag/users/GET/users/{userId}). It is not required by the meeting bot after `participantUserId` is known.
+5. Activate the S2S app. Zoom does not issue usable account-credential tokens while it is inactive.
+6. Copy its **Account ID**, **Client ID**, and **Client Secret**.
+
+The S2S app does not need an event subscription. It only obtains a short-lived account token and calls Zoom's [participant RTMS status API](https://developers.zoom.us/docs/api/meetings/#tag/meetings/PATCH/live_meetings/{meetingId}/rtms_app/status).
+
+#### 3. Enable RTMS for the Zoom account
+
+As a Zoom account admin, enable **Share realtime meeting content with apps**, then add the dedicated General app's Client ID under **Allow apps to access meeting content**. The meeting bot starts RTMS through the REST API, so Zoom's auto-start setting is optional. The account also needs Zoom Developer Pack credits. Zoom documents these prerequisites and settings in [Getting started with RTMS](https://developers.zoom.us/docs/rtms/meetings/getting-started/) and the [participant RTMS status API](https://developers.zoom.us/docs/api/meetings/#tag/meetings/PATCH/live_meetings/{meetingId}/rtms_app/status).
+
+#### 4. Map the customer to its exact Winkk team
+
+Obtain the exact Winkk `teamId` from the authenticated meeting job and the Zoom `id` of the user whose meeting participation authorizes RTMS. The Zoom user ID is the `id` returned by Zoom's Get a user API; it is not an email address, meeting ID, account ID, or Winkk team ID.
+
+Map the values as follows:
+
+| Zoom/Winkk source | Customer JSON field |
+| --- | --- |
+| Exact Winkk team ID | Outer JSON key |
+| S2S Account ID | `accountId` |
+| S2S Client ID | `clientId` |
+| S2S Client Secret | `clientSecret` |
+| Zoom user's `id` | `participantUserId` |
+| Chosen unique webhook identifier | `rtmsApp.webhookId` |
+| General app Client ID | `rtmsApp.clientId` |
+| General app Client Secret | `rtmsApp.clientSecret` |
+| General app Access Secret Token | `rtmsApp.webhookSecret` |
 
 Add the customer's S2S settings plus a complete `rtmsApp` object:
 
@@ -158,13 +230,50 @@ Add the customer's S2S settings plus a complete `rtmsApp` object:
 }
 ```
 
-Configure that General app's event endpoint as:
+Multiple dedicated accounts are stored in the same environment variable, keyed by their exact and distinct Winkk team IDs:
 
-```text
-https://<meeting-bot-host>/zoom/rtms/webhook/apps/customer-app-unique-id
+```json
+{
+  "winkk-team-id": {
+    "enabled": true,
+    "accountId": "winkk-zoom-account-id",
+    "clientId": "winkk-s2s-client-id",
+    "clientSecret": "winkk-s2s-client-secret",
+    "participantUserId": "winkk-zoom-user-id",
+    "rtmsApp": {
+      "webhookId": "winkk-prod",
+      "clientId": "winkk-general-app-client-id",
+      "clientSecret": "winkk-general-app-client-secret",
+      "webhookSecret": "winkk-general-app-secret-token"
+    }
+  },
+  "customer-team-id": {
+    "enabled": true,
+    "accountId": "customer-zoom-account-id",
+    "clientId": "customer-s2s-client-id",
+    "clientSecret": "customer-s2s-client-secret",
+    "participantUserId": "customer-zoom-user-id",
+    "rtmsApp": {
+      "webhookId": "customer-prod",
+      "clientId": "customer-general-app-client-id",
+      "clientSecret": "customer-general-app-client-secret",
+      "webhookSecret": "customer-general-app-secret-token"
+    }
+  }
+}
 ```
 
 `webhookId` may contain letters, numbers, `_`, and `-`; it must be unique and must not be `global`. Dedicated app settings are all-or-nothing. Invalid, partial, duplicated, disabled, and unknown entries fail closed and never inherit another app.
+
+Store the complete JSON as the single secret environment variable `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON`. With the current browser-first deployment, the non-secret transport settings are:
+
+```env
+ZOOM_RECORDING_TRANSPORT=browser
+ZOOM_RTMS_FALLBACK_ENABLED=true
+ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE=dedicated_customer
+```
+
+Store `ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE` in the same 1Password item as the customer JSON. Dedicated mode rejects customer entries without a complete `rtmsApp`, preventing an accidental fallback to the shared Winkk General app. Global `ZOOM_RTMS_*` app and OAuth values are not used for an enabled dedicated entry with `rtmsApp`; they may coexist only for the separate internal/shared profiles. After updating the secret, restart the process or let the 1Password operator restart the pods, then verify one controlled meeting for each exact team ID.
 
 ## Customer onboarding checklist
 
@@ -201,7 +310,7 @@ Production RTMS workloads must run on `linux/amd64`. The Zoom RTMS SDK rejects L
 Recommended items:
 
 - `Meeting Bot App Secrets`: shared General app credentials, internal S2S credentials, Sentry, and other application secrets.
-- `Meeting Bot Customer RTMS Credentials`: only `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON`.
+- `Meeting Bot Customer RTMS Credentials`: `ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE` and `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON`.
 
 The automatically generated 1Password `Password` field is not used by the meeting bot. The internal team ID and transport flags are not secrets and can live in the deployment configuration.
 

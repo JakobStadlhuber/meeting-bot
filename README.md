@@ -157,6 +157,7 @@ Internal/global mode only:
 - `ZOOM_RTMS_PARTICIPANT_USER_ID` to select and correlate the authorized host when using account-level OAuth
 
 Customer mode uses the exact enabled `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` entry instead of the internal/global OAuth settings.
+Set `ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE=dedicated_customer` to reject any customer entry that does not contain its own complete `rtmsApp`. Use `shared_customer` to reject dedicated app entries, or `auto` for backwards-compatible mixed deployments.
 
 Three credential profiles are supported simultaneously:
 
@@ -536,6 +537,7 @@ Notes:
 | `ZOOM_RECORDING_TRANSPORT` | Zoom transport: `browser`, or `rtms` for forced RTMS. | `browser` |
 | `ZOOM_RTMS_FALLBACK_ENABLED` | With browser transport, allow RTMS only after an explicit pre-join automated-bot block. Ignored by forced RTMS. | `false` |
 | `ZOOM_RTMS_GLOBAL_TEAM_ID` | Exact internal team allowed to use global RTMS OAuth credentials. | - |
+| `ZOOM_RTMS_CUSTOMER_CREDENTIAL_MODE` | Customer credential policy: `auto`, `shared_customer`, or `dedicated_customer`. | `auto` |
 | `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` | Exact team-keyed customer S2S OAuth credentials, optionally including a dedicated `rtmsApp`. | - |
 | `SENTRY_DSN` | Optional Sentry DSN; monitoring is a complete no-op when omitted. | - |
 | `SENTRY_ENVIRONMENT` | Sentry environment tag. | `NODE_ENV` |
