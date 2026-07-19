@@ -1,6 +1,11 @@
 import config from '../config';
 import { KnownError, ZoomRtmsCredentialsMissingError } from '../error';
-import { ZoomRtmsApiCredentials, ZoomRtmsEventScope } from './types';
+import {
+  ZoomRtmsApiCredentials,
+  ZoomRtmsAppCredentials,
+  ZoomRtmsCredentialMode,
+  ZoomRtmsEventScope,
+} from './types';
 
 export type ZoomRtmsCredentialErrorReason =
   | 'disabled'
@@ -19,19 +24,34 @@ export class ZoomRtmsCredentialConfigurationError extends KnownError {
 }
 
 export interface ResolvedZoomRtmsCredentials {
+  credentialMode: ZoomRtmsCredentialMode;
+  app: ZoomRtmsAppCredentials;
   api: ZoomRtmsApiCredentials;
   eventScope: ZoomRtmsEventScope;
 }
 
-const globalCredentials = (teamId: string): ResolvedZoomRtmsCredentials => {
-  const rtmsClientId = config.zoomRtms.clientId;
-  if (!rtmsClientId) {
+const globalAppCredentials = (teamId: string): ZoomRtmsAppCredentials => {
+  const clientId = config.zoomRtms.clientId;
+  const clientSecret = config.zoomRtms.clientSecret;
+  const webhookSecret = config.zoomRtms.webhookSecret;
+  if (!clientId || !clientSecret || !webhookSecret) {
     throw new ZoomRtmsCredentialConfigurationError(
       'invalid_global_configuration',
       teamId,
-      'ZOOM_RTMS_CLIENT_ID is required for RTMS'
+      'ZOOM_RTMS_CLIENT_ID, ZOOM_RTMS_CLIENT_SECRET and ZOOM_RTMS_WEBHOOK_SECRET are required for the global RTMS app'
     );
   }
+
+  return {
+    appId: 'global',
+    clientId,
+    clientSecret,
+    webhookSecret,
+  };
+};
+
+const globalCredentials = (teamId: string): ResolvedZoomRtmsCredentials => {
+  const app = globalAppCredentials(teamId);
 
   const hasAccessToken = Boolean(config.zoomRtms.oauthAccessToken);
   const hasServerCredentials = Boolean(
@@ -48,10 +68,12 @@ const globalCredentials = (teamId: string): ResolvedZoomRtmsCredentials => {
   }
 
   return {
+    credentialMode: 'internal',
+    app,
     api: {
       source: 'legacy',
       customerId: teamId,
-      rtmsClientId,
+      rtmsClientId: app.clientId,
       participantUserId: config.zoomRtms.participantUserId,
       oauthAccessToken: config.zoomRtms.oauthAccessToken,
       oauthAccountId: config.zoomRtms.oauthAccountId,
@@ -59,6 +81,7 @@ const globalCredentials = (teamId: string): ResolvedZoomRtmsCredentials => {
       oauthClientSecret: config.zoomRtms.oauthClientSecret,
     },
     eventScope: {
+      appId: app.appId,
       customerId: teamId,
       operatorId: config.zoomRtms.participantUserId,
     },
@@ -70,26 +93,29 @@ export const resolveZoomRtmsCredentials = (
 ): ResolvedZoomRtmsCredentials => {
   const customer = config.zoomRtms.customerCredentials[teamId];
   if (customer?.enabled) {
-    const rtmsClientId = config.zoomRtms.clientId;
-    if (!rtmsClientId) {
-      throw new ZoomRtmsCredentialConfigurationError(
-        'invalid_global_configuration',
-        teamId,
-        'ZOOM_RTMS_CLIENT_ID is required for customer RTMS recordings'
-      );
-    }
+    const app: ZoomRtmsAppCredentials = customer.rtmsApp
+      ? {
+        appId: customer.rtmsApp.webhookId,
+        clientId: customer.rtmsApp.clientId,
+        clientSecret: customer.rtmsApp.clientSecret,
+        webhookSecret: customer.rtmsApp.webhookSecret,
+      }
+      : globalAppCredentials(teamId);
 
     return {
+      credentialMode: customer.rtmsApp ? 'dedicated_customer' : 'shared_customer',
+      app,
       api: {
         source: 'customer',
         customerId: teamId,
-        rtmsClientId,
+        rtmsClientId: app.clientId,
         participantUserId: customer.participantUserId,
         oauthAccountId: customer.accountId,
         oauthClientId: customer.clientId,
         oauthClientSecret: customer.clientSecret,
       },
       eventScope: {
+        appId: app.appId,
         customerId: teamId,
         operatorId: customer.participantUserId,
       },

@@ -26,9 +26,30 @@ const headerValue = (value: string | string[] | undefined): string | undefined =
 
 const router = express.Router();
 
+const resolveWebhook = (
+  webhookId?: string
+): { appId: string; secret?: string } | undefined => {
+  if (typeof webhookId === 'undefined') {
+    return { appId: 'global', secret: config.zoomRtms.webhookSecret };
+  }
+
+  const credentials = Object.values(config.zoomRtms.customerCredentials)
+    .find((customer) =>
+      customer.enabled
+      && customer.rtmsApp?.webhookId === webhookId
+    );
+  return credentials?.rtmsApp
+    ? { appId: webhookId, secret: credentials.rtmsApp.webhookSecret }
+    : undefined;
+};
+
 export const handleZoomRtmsWebhook = async (req: RawBodyRequest, res: Response) => {
   const body = req.body as ZoomWebhookBody;
-  const secret = config.zoomRtms.webhookSecret;
+  const webhook = resolveWebhook(req.params?.webhookId);
+  if (!webhook) {
+    return res.status(404).json({ error: 'Zoom RTMS webhook is not configured' });
+  }
+  const { appId, secret } = webhook;
 
   if (body.event === 'endpoint.url_validation') {
     const plainToken = body.payload?.plainToken;
@@ -88,7 +109,7 @@ export const handleZoomRtmsWebhook = async (req: RawBodyRequest, res: Response) 
   };
 
   try {
-    await zoomRtmsEventStore.publish(event);
+    await zoomRtmsEventStore.publish(event, appId);
     return res.sendStatus(204);
   } catch (error) {
     console.error('Unable to persist Zoom RTMS webhook event', error);
@@ -97,5 +118,6 @@ export const handleZoomRtmsWebhook = async (req: RawBodyRequest, res: Response) 
 };
 
 router.post('/', handleZoomRtmsWebhook);
+router.post('/apps/:webhookId', handleZoomRtmsWebhook);
 
 export default router;

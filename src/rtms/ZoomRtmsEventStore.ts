@@ -28,36 +28,46 @@ export class ZoomRtmsEventStore {
     return scope.operatorId || '*';
   }
 
-  private operatorRoutesKey(meetingId: string, operatorId: string): string {
-    return `${PREFIX}:meeting:${normalizeZoomMeetingId(meetingId)}:operator:${this.digest(operatorId)}:routes`;
+  private appId(scope: ZoomRtmsEventScope): string {
+    return scope.appId || 'global';
+  }
+
+  private appKeySegment(appId: string): string {
+    return appId === 'global' ? '' : `:app:${this.digest(appId)}`;
+  }
+
+  private operatorRoutesKey(meetingId: string, appId: string, operatorId: string): string {
+    return `${PREFIX}:meeting:${normalizeZoomMeetingId(meetingId)}${this.appKeySegment(appId)}:operator:${this.digest(operatorId)}:routes`;
   }
 
   private meetingQueue(
     meetingId: string,
+    appId: string,
     operatorId: string,
     customerDigest: string
   ): string {
-    return `${PREFIX}:meeting:${normalizeZoomMeetingId(meetingId)}:operator:${this.digest(operatorId)}:customer:${customerDigest}:events`;
+    return `${PREFIX}:meeting:${normalizeZoomMeetingId(meetingId)}${this.appKeySegment(appId)}:operator:${this.digest(operatorId)}:customer:${customerDigest}:events`;
   }
 
-  private streamQueue(streamId: string, customerDigest: string): string {
-    return `${PREFIX}:stream:${streamId}:customer:${customerDigest}:events`;
+  private streamQueue(streamId: string, appId: string, customerDigest: string): string {
+    return `${PREFIX}:stream:${streamId}${this.appKeySegment(appId)}:customer:${customerDigest}:events`;
   }
 
-  private pendingStreamQueue(streamId: string): string {
-    return `${PREFIX}:stream:${streamId}:pending-events`;
+  private pendingStreamQueue(streamId: string, appId: string): string {
+    return `${PREFIX}:stream:${streamId}${this.appKeySegment(appId)}:pending-events`;
   }
 
-  private activeStreamKey(streamId: string): string {
-    return `${PREFIX}:stream:${streamId}:active`;
+  private activeStreamKey(streamId: string, appId: string): string {
+    return `${PREFIX}:stream:${streamId}${this.appKeySegment(appId)}:active`;
   }
 
   private reservationKey(meetingId: string, scope: ZoomRtmsEventScope): string {
-    return `${PREFIX}:meeting:${normalizeZoomMeetingId(meetingId)}:operator:${this.digest(this.operatorId(scope))}:owner`;
+    return `${PREFIX}:meeting:${normalizeZoomMeetingId(meetingId)}${this.appKeySegment(this.appId(scope))}:operator:${this.digest(this.operatorId(scope))}:owner`;
   }
 
-  private dedupeKey(event: ZoomRtmsWebhookEvent): string {
+  private dedupeKey(event: ZoomRtmsWebhookEvent, appId: string): string {
     const identity = [
+      ...(appId === 'global' ? [] : [appId]),
       event.event,
       event.event_ts ?? '',
       event.payload.meeting_uuid,
@@ -108,12 +118,12 @@ export class ZoomRtmsEventStore {
     return this.blockingClient;
   }
 
-  async publish(event: ZoomRtmsWebhookEvent): Promise<boolean> {
+  async publish(event: ZoomRtmsWebhookEvent, appId = 'global'): Promise<boolean> {
     const streamId = event.payload.rtms_stream_id;
     if (!streamId) throw new Error('RTMS webhook is missing rtms_stream_id');
 
     if (!config.isRedisEnabled) {
-      return this.publishLocally(event);
+      return this.publishLocally(event, appId);
     }
 
     await this.connect();
@@ -122,15 +132,19 @@ export class ZoomRtmsEventStore {
     let queueKeys: string[];
     if (event.event === 'meeting.rtms_started') {
       const meetingId = normalizeZoomMeetingId(event.payload.meeting_id ?? '');
-      const activeCustomer = await client.get(this.activeStreamKey(streamId));
+      const activeCustomer = await client.get(this.activeStreamKey(streamId, appId));
       queueKeys = activeCustomer
-        ? [this.streamQueue(streamId, activeCustomer)]
-        : await this.meetingQueuesForStart(meetingId, String(event.payload.operator_id ?? ''));
+        ? [this.streamQueue(streamId, appId, activeCustomer)]
+        : await this.meetingQueuesForStart(
+          meetingId,
+          String(event.payload.operator_id ?? ''),
+          appId
+        );
     } else {
-      const activeCustomer = await client.get(this.activeStreamKey(streamId));
+      const activeCustomer = await client.get(this.activeStreamKey(streamId, appId));
       queueKeys = [activeCustomer
-        ? this.streamQueue(streamId, activeCustomer)
-        : this.pendingStreamQueue(streamId)];
+        ? this.streamQueue(streamId, appId, activeCustomer)
+        : this.pendingStreamQueue(streamId, appId)];
     }
 
     if (queueKeys.length === 0) return true;
@@ -139,7 +153,7 @@ export class ZoomRtmsEventStore {
       'EVAL',
       'if redis.call("SET", KEYS[1], "1", "EX", ARGV[2], "NX") then for i = 2, #KEYS do redis.call("RPUSH", KEYS[i], ARGV[1]); redis.call("EXPIRE", KEYS[i], ARGV[2]); end; return 1; end; return 0;',
       String(queueKeys.length + 1),
-      this.dedupeKey(event),
+      this.dedupeKey(event, appId),
       ...queueKeys,
       JSON.stringify(event),
       String(ttl),
@@ -153,7 +167,12 @@ export class ZoomRtmsEventStore {
     timeoutSeconds: number
   ): Promise<ZoomRtmsWebhookEvent | null> {
     return this.waitFor(
-      this.meetingQueue(meetingId, this.operatorId(scope), this.digest(scope.customerId)),
+      this.meetingQueue(
+        meetingId,
+        this.appId(scope),
+        this.operatorId(scope),
+        this.digest(scope.customerId)
+      ),
       timeoutSeconds
     );
   }
@@ -164,21 +183,22 @@ export class ZoomRtmsEventStore {
     timeoutSeconds: number
   ): Promise<ZoomRtmsWebhookEvent | null> {
     return this.waitFor(
-      this.streamQueue(streamId, this.digest(scope.customerId)),
+      this.streamQueue(streamId, this.appId(scope), this.digest(scope.customerId)),
       timeoutSeconds
     );
   }
 
   async markStreamActive(streamId: string, scope: ZoomRtmsEventScope): Promise<void> {
     const customerDigest = this.digest(scope.customerId);
+    const appId = this.appId(scope);
     if (!config.isRedisEnabled) {
-      const activeCustomer = this.localActiveStreams.get(streamId);
+      const activeCustomer = this.localActiveStreams.get(this.activeStreamKey(streamId, appId));
       if (activeCustomer && activeCustomer !== customerDigest) {
         throw new Error('Zoom RTMS stream is already owned by another customer');
       }
-      this.localActiveStreams.set(streamId, customerDigest);
-      const pendingQueue = this.pendingStreamQueue(streamId);
-      const targetQueue = this.streamQueue(streamId, customerDigest);
+      this.localActiveStreams.set(this.activeStreamKey(streamId, appId), customerDigest);
+      const pendingQueue = this.pendingStreamQueue(streamId, appId);
+      const targetQueue = this.streamQueue(streamId, appId, customerDigest);
       const pendingEvents = this.localQueues.get(pendingQueue) ?? [];
       this.localQueues.delete(pendingQueue);
       pendingEvents.forEach((event) => this.enqueueLocal(targetQueue, event));
@@ -194,9 +214,9 @@ export class ZoomRtmsEventStore {
       'EVAL',
       'local owner = redis.call("GET", KEYS[1]); if owner and owner ~= ARGV[1] then return -1; end; redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2]); local events = redis.call("LRANGE", KEYS[2], 0, -1); for _, event in ipairs(events) do redis.call("RPUSH", KEYS[3], event); end; if #events > 0 then redis.call("EXPIRE", KEYS[3], ARGV[3]); end; redis.call("DEL", KEYS[2]); return #events;',
       '3',
-      this.activeStreamKey(streamId),
-      this.pendingStreamQueue(streamId),
-      this.streamQueue(streamId, customerDigest),
+      this.activeStreamKey(streamId, appId),
+      this.pendingStreamQueue(streamId, appId),
+      this.streamQueue(streamId, appId, customerDigest),
       customerDigest,
       String(activeTtl),
       String(config.zoomRtms.eventTtlSeconds),
@@ -208,23 +228,25 @@ export class ZoomRtmsEventStore {
 
   async markStreamInactive(streamId: string, scope?: ZoomRtmsEventScope): Promise<void> {
     const expectedCustomer = scope ? this.digest(scope.customerId) : undefined;
+    const appId = scope ? this.appId(scope) : 'global';
     if (!config.isRedisEnabled) {
-      if (!expectedCustomer || this.localActiveStreams.get(streamId) === expectedCustomer) {
-        this.localActiveStreams.delete(streamId);
+      const activeStreamKey = this.activeStreamKey(streamId, appId);
+      if (!expectedCustomer || this.localActiveStreams.get(activeStreamKey) === expectedCustomer) {
+        this.localActiveStreams.delete(activeStreamKey);
       }
       return;
     }
 
     await this.connect();
     if (!expectedCustomer) {
-      await this.getCommandClient().del(this.activeStreamKey(streamId));
+      await this.getCommandClient().del(this.activeStreamKey(streamId, appId));
       return;
     }
     await this.getCommandClient().sendCommand([
       'EVAL',
       'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]); end; return 0;',
       '1',
-      this.activeStreamKey(streamId),
+      this.activeStreamKey(streamId, appId),
       expectedCustomer,
     ]);
   }
@@ -236,7 +258,11 @@ export class ZoomRtmsEventStore {
     scope: ZoomRtmsEventScope
   ): Promise<boolean> {
     const key = this.reservationKey(meetingId, scope);
-    const routesKey = this.operatorRoutesKey(meetingId, this.operatorId(scope));
+    const routesKey = this.operatorRoutesKey(
+      meetingId,
+      this.appId(scope),
+      this.operatorId(scope)
+    );
     const customerDigest = this.digest(scope.customerId);
     if (!config.isRedisEnabled) {
       if (this.localReservations.has(key)) return false;
@@ -268,7 +294,11 @@ export class ZoomRtmsEventStore {
     scope: ZoomRtmsEventScope
   ): Promise<void> {
     const key = this.reservationKey(meetingId, scope);
-    const routesKey = this.operatorRoutesKey(meetingId, this.operatorId(scope));
+    const routesKey = this.operatorRoutesKey(
+      meetingId,
+      this.appId(scope),
+      this.operatorId(scope)
+    );
     const customerDigest = this.digest(scope.customerId);
     if (!config.isRedisEnabled) {
       if (this.localReservations.get(key) === ownerId) {
@@ -319,58 +349,61 @@ export class ZoomRtmsEventStore {
 
   private async meetingQueuesForStart(
     meetingId: string,
-    operatorId: string
+    operatorId: string,
+    appId: string
   ): Promise<string[]> {
     const operatorIds = operatorId ? [operatorId, '*'] : ['*'];
     const customerRoutes = await Promise.all(operatorIds.map(async (routeOperatorId) => ({
       operatorId: routeOperatorId,
       customerDigests: await this.getCommandClient().sMembers(
-        this.operatorRoutesKey(meetingId, routeOperatorId)
+        this.operatorRoutesKey(meetingId, appId, routeOperatorId)
       ),
     })));
     return customerRoutes.flatMap(({ operatorId: routeOperatorId, customerDigests }) =>
       customerDigests.map((customerDigest) =>
-        this.meetingQueue(meetingId, routeOperatorId, customerDigest)
+        this.meetingQueue(meetingId, appId, routeOperatorId, customerDigest)
       )
     );
   }
 
   private localMeetingQueuesForStart(
     meetingId: string,
-    operatorId: string
+    operatorId: string,
+    appId: string
   ): string[] {
     const operatorIds = operatorId ? [operatorId, '*'] : ['*'];
     return operatorIds.flatMap((routeOperatorId) =>
       Array.from(
-        this.localRoutes.get(this.operatorRoutesKey(meetingId, routeOperatorId)) ?? []
+        this.localRoutes.get(this.operatorRoutesKey(meetingId, appId, routeOperatorId)) ?? []
       ).map((customerDigest) =>
-        this.meetingQueue(meetingId, routeOperatorId, customerDigest)
+        this.meetingQueue(meetingId, appId, routeOperatorId, customerDigest)
       )
     );
   }
 
-  private publishLocally(event: ZoomRtmsWebhookEvent): boolean {
+  private publishLocally(event: ZoomRtmsWebhookEvent, appId = 'global'): boolean {
     const streamId = event.payload.rtms_stream_id;
     let queueKeys: string[];
     if (event.event === 'meeting.rtms_started') {
       const meetingId = normalizeZoomMeetingId(event.payload.meeting_id ?? '');
-      const activeCustomer = this.localActiveStreams.get(streamId);
+      const activeCustomer = this.localActiveStreams.get(this.activeStreamKey(streamId, appId));
       queueKeys = activeCustomer
-        ? [this.streamQueue(streamId, activeCustomer)]
+        ? [this.streamQueue(streamId, appId, activeCustomer)]
         : this.localMeetingQueuesForStart(
           meetingId,
-          String(event.payload.operator_id ?? '')
+          String(event.payload.operator_id ?? ''),
+          appId
         );
     } else {
-      const activeCustomer = this.localActiveStreams.get(streamId);
+      const activeCustomer = this.localActiveStreams.get(this.activeStreamKey(streamId, appId));
       queueKeys = [activeCustomer
-        ? this.streamQueue(streamId, activeCustomer)
-        : this.pendingStreamQueue(streamId)];
+        ? this.streamQueue(streamId, appId, activeCustomer)
+        : this.pendingStreamQueue(streamId, appId)];
     }
 
     if (queueKeys.length === 0) return true;
 
-    const dedupeKey = this.dedupeKey(event);
+    const dedupeKey = this.dedupeKey(event, appId);
     if (this.localDedupe.has(dedupeKey)) return false;
     this.localDedupe.add(dedupeKey);
     const timer = setTimeout(

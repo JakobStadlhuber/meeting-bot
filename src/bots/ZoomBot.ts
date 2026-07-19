@@ -57,7 +57,8 @@ export class ZoomBot extends BotBase {
   async join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader }: JoinParams): Promise<void> {
     const _state: BotStatus[] = ['processing'];
     let recoveredBrowserError: ZoomBrowserJoinBlockedError | undefined;
-    let recordingTransport: 'browser' | 'rtms' = config.zoomRecordingTransport;
+    let recordingTransport: 'browser' | 'rtms' =
+      config.zoomTransportStrategy === 'rtms_only' ? 'rtms' : 'browser';
     let fallbackResult = 'not_attempted';
 
     const annotateFailure = (error: unknown, phase: string) => {
@@ -81,7 +82,7 @@ export class ZoomBot extends BotBase {
     try {
       const pushState = (st: BotStatus) => _state.push(st);
       const joinParams = { url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader };
-      if (config.zoomRecordingTransport === 'rtms') {
+      if (config.zoomTransportStrategy === 'rtms_only') {
         try {
           await new ZoomRtmsTransport(this._logger).record(joinParams, pushState);
         } catch (rtmsError) {
@@ -93,7 +94,7 @@ export class ZoomBot extends BotBase {
         } catch (browserError) {
           if (!shouldUseZoomRtmsFallback(
             browserError,
-            config.zoomRtmsFallbackEnabled,
+            config.zoomTransportStrategy === 'browser_then_rtms',
             this.joinState
           )) {
             throw browserError;

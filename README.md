@@ -125,7 +125,7 @@ Content-Type: application/json
 }
 ```
 
-Zoom uses the browser recorder by default. With `ZOOM_RTMS_FALLBACK_ENABLED=true`, only an explicit Zoom automated-bot rejection before admission can fall back to RTMS. Host rejection, sign-in requirements, lobby timeouts, browser crashes and recording failures never trigger that fallback.
+Zoom transport is deployment-wide: `browser` with fallback disabled is browser-only, `browser` with `ZOOM_RTMS_FALLBACK_ENABLED=true` is browser→RTMS, and `rtms` is forced RTMS without a Zoom browser. Only an explicit Zoom automated-bot rejection before admission can trigger fallback. Host rejection, sign-in requirements, lobby timeouts, browser crashes and recording failures never do.
 
 See [Zoom RTMS operations and customer onboarding](docs/zoom-rtms.md) for the complete setup, deployment modes, Zoom prerequisites, customer onboarding, and troubleshooting guide.
 
@@ -157,6 +157,32 @@ Internal/global mode only:
 - `ZOOM_RTMS_PARTICIPANT_USER_ID` to select and correlate the authorized host when using account-level OAuth
 
 Customer mode uses the exact enabled `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` entry instead of the internal/global OAuth settings.
+
+Three credential profiles are supported simultaneously:
+
+- Internal: the exact `ZOOM_RTMS_GLOBAL_TEAM_ID` uses the global RTMS app and global OAuth settings.
+- Shared customer: an exact customer entry without `rtmsApp` uses the global RTMS app and that customer's S2S OAuth settings.
+- Dedicated customer: an exact customer entry with a complete `rtmsApp` uses that customer's own General app and S2S OAuth app. Configure its webhook as `POST /zoom/rtms/webhook/apps/<webhookId>`.
+
+Dedicated customer example:
+
+```json
+{
+  "team-id": {
+    "enabled": true,
+    "accountId": "zoom-account-id",
+    "clientId": "zoom-s2s-client-id",
+    "clientSecret": "zoom-s2s-client-secret",
+    "participantUserId": "zoom-user-id",
+    "rtmsApp": {
+      "webhookId": "unique-customer-app-id",
+      "clientId": "zoom-general-app-client-id",
+      "clientSecret": "zoom-general-app-client-secret",
+      "webhookSecret": "zoom-general-app-webhook-secret"
+    }
+  }
+}
+```
 
 The General app needs `meeting:read:meeting_audio` and `meeting:read:meeting_video`; the OAuth app needs `meeting:update:participant_rtms_app_status` or its admin variant. The app must be authorized by the meeting host/account. RTMS does not anonymously join arbitrary Zoom links; the password in a join URL is not used. The RTMS output contains Zoom's mixed audio and active-speaker H.264 video and is uploaded as MP4 through the existing uploader. The official RTMS Node SDK currently requires Linux x64 (or macOS arm64); the browser transport remains available on other image architectures.
 
@@ -507,10 +533,10 @@ Notes:
 | `TEAMS_AUDIO_STABILIZATION_MS` | Delay before starting Microsoft Teams ffmpeg recording after joining | `1000` |
 | `GOOGLE_CHROME_CDP_URL` | Optional CDP endpoint for Google Meet joins, e.g. `http://host.docker.internal:9222`, to use an external Chrome instead of Docker Chrome. | - |
 | `ZOOM_CHROME_CDP_URL` | Optional CDP endpoint for isolated Zoom browser contexts. | - |
-| `ZOOM_RECORDING_TRANSPORT` | Primary Zoom transport (`browser` or `rtms`). | `browser` |
-| `ZOOM_RTMS_FALLBACK_ENABLED` | Allow RTMS only after an explicit pre-join Zoom automated-bot block. | `false` |
+| `ZOOM_RECORDING_TRANSPORT` | Zoom transport: `browser`, or `rtms` for forced RTMS. | `browser` |
+| `ZOOM_RTMS_FALLBACK_ENABLED` | With browser transport, allow RTMS only after an explicit pre-join automated-bot block. Ignored by forced RTMS. | `false` |
 | `ZOOM_RTMS_GLOBAL_TEAM_ID` | Exact internal team allowed to use global RTMS OAuth credentials. | - |
-| `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` | Exact team-keyed customer S2S OAuth credentials for RTMS. | - |
+| `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` | Exact team-keyed customer S2S OAuth credentials, optionally including a dedicated `rtmsApp`. | - |
 | `SENTRY_DSN` | Optional Sentry DSN; monitoring is a complete no-op when omitted. | - |
 | `SENTRY_ENVIRONMENT` | Sentry environment tag. | `NODE_ENV` |
 | `SENTRY_RELEASE` | Sentry release tag. | - |

@@ -1,8 +1,7 @@
 import { Logger } from 'winston';
 import { createRequire } from 'module';
-import config from '../config';
 import { KnownError } from '../error';
-import { ZoomRtmsPayload } from './types';
+import { ZoomRtmsAppCredentials, ZoomRtmsPayload } from './types';
 import { RtmsMediaRecorder } from './RtmsMediaRecorder';
 
 interface RtmsClient {
@@ -72,24 +71,38 @@ export const assertZoomRtmsSdkAvailable = (): void => {
   loadSdk();
 };
 
+export const buildZoomRtmsSdkJoinParams = (
+  payload: ZoomRtmsPayload,
+  app: ZoomRtmsAppCredentials,
+  timeoutMs: number
+): Record<string, unknown> => ({
+  meeting_uuid: payload.meeting_uuid,
+  rtms_stream_id: payload.rtms_stream_id,
+  server_urls: payload.server_urls,
+  client: app.clientId,
+  secret: app.clientSecret,
+  timeout: timeoutMs,
+  pollInterval: 10,
+  is_verify_cert: 1,
+});
+
 export class ZoomRtmsSdkClient {
   private activeClient?: ActiveClient;
   private connectionIssue?: ZoomRtmsSdkConnectionIssue;
 
   constructor(
     private readonly recorder: RtmsMediaRecorder,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly app: ZoomRtmsAppCredentials
   ) {}
 
   async connect(payload: ZoomRtmsPayload, timeoutMs = 30_000): Promise<void> {
     await this.close();
     this.connectionIssue = undefined;
 
-    const clientId = config.zoomRtms.clientId;
-    const clientSecret = config.zoomRtms.clientSecret;
-    if (!clientId || !clientSecret) {
+    if (!this.app.clientId || !this.app.clientSecret) {
       throw new KnownError(
-        'ZOOM_RTMS_CLIENT_ID and ZOOM_RTMS_CLIENT_SECRET are required for RTMS',
+        'Zoom RTMS app client ID and client secret are required',
         false,
         0
       );
@@ -191,16 +204,9 @@ export class ZoomRtmsSdkClient {
           return;
         }
 
-        const joining = client.join({
-          meeting_uuid: payload.meeting_uuid,
-          rtms_stream_id: payload.rtms_stream_id,
-          server_urls: payload.server_urls,
-          client: clientId,
-          secret: clientSecret,
-          timeout: boundedTimeoutMs,
-          pollInterval: 10,
-          is_verify_cert: 1,
-        });
+        const joining = client.join(
+          buildZoomRtmsSdkJoinParams(payload, this.app, boundedTimeoutMs)
+        );
         if (!joining) finish(new Error('Zoom RTMS SDK could not start the stream connection'));
       });
     } catch (error) {

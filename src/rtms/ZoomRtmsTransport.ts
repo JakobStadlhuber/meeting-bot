@@ -71,13 +71,6 @@ export class ZoomRtmsTransport {
     let meetingReserved = false;
 
     try {
-      if (!config.zoomRtms.clientId || !config.zoomRtms.clientSecret || !config.zoomRtms.webhookSecret) {
-        throw new KnownError(
-          'ZOOM_RTMS_CLIENT_ID, ZOOM_RTMS_CLIENT_SECRET and ZOOM_RTMS_WEBHOOK_SECRET are required',
-          false,
-          0
-        );
-      }
       if (!config.isRedisEnabled && (NODE_ENV === 'production' || NODE_ENV === 'staging')) {
         throw new KnownError(
           'Zoom RTMS requires REDIS_CONSUMER_ENABLED=true in multi-replica environments',
@@ -104,7 +97,10 @@ export class ZoomRtmsTransport {
         );
       }
 
-      this.logger.info('Requesting Zoom RTMS stream', { meetingId });
+      this.logger.info('Requesting Zoom RTMS stream', {
+        meetingId,
+        credentialMode: credentials.credentialMode,
+      });
       const startRequestedAt = Date.now();
       const initialJoinDeadline = startRequestedAt + config.joinWaitTime * 60 * 1000;
       const startResult = await api.start(
@@ -134,7 +130,7 @@ export class ZoomRtmsTransport {
       lastStartPayload = startEvent.payload;
       rtmsRequested = true;
       await zoomRtmsEventStore.markStreamActive(streamId, eventScope);
-      client = new ZoomRtmsSdkClient(recorder, this.logger);
+      client = new ZoomRtmsSdkClient(recorder, this.logger, credentials.app);
       await this.connectWithBackoff(
         client,
         lastStartPayload,

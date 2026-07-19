@@ -1,24 +1,32 @@
 # Zoom RTMS operations and customer onboarding
 
-This guide covers two supported RTMS use cases:
+This guide covers three supported RTMS credential use cases:
 
 1. An internal private Zoom app used only by the developer's own Zoom account.
-2. Explicit customer enablement selected by the exact Winkk `teamId`.
+2. One shared Zoom RTMS app with customer OAuth credentials selected by exact Winkk `teamId`.
+3. A separate private Zoom RTMS app and OAuth app for each customer, also selected by exact `teamId`.
 
 RTMS does not join a meeting as an anonymous participant. It streams meeting media for an authorized Zoom user. The meeting URL is used only to extract the meeting ID; its password does not authorize RTMS.
 
 ## Deployment modes
 
-| Mode | Primary transport | Credential selection | Intended use |
+| Mode | Configuration | Behavior |
+| --- | --- | --- |
+| Browser only | `ZOOM_RECORDING_TRANSPORT=browser`, fallback disabled | Never uses RTMS |
+| Browser then RTMS | `ZOOM_RECORDING_TRANSPORT=browser`, `ZOOM_RTMS_FALLBACK_ENABLED=true` | Uses RTMS only after an explicit automated-bot block before browser admission |
+| Forced RTMS | `ZOOM_RECORDING_TRANSPORT=rtms` | Uses RTMS directly and never starts Chrome for Zoom |
+
+Transport selection is independent from credential selection:
+
+| Credential profile | Selection | RTMS General app | OAuth control app |
 | --- | --- | --- | --- |
-| Browser only | `browser` | None | Disable RTMS |
-| Internal RTMS | `rtms` | Exact `ZOOM_RTMS_GLOBAL_TEAM_ID` | Private app in the company's own Zoom account |
-| Customer fallback | `browser` with fallback enabled | Exact customer JSON entry or exact `ZOOM_RTMS_GLOBAL_TEAM_ID` | Browser first; RTMS only after an automated-bot block before admission |
-| Customer RTMS first | `rtms` | Exact customer JSON entry | RTMS first for every configured team |
+| Internal | Exact `ZOOM_RTMS_GLOBAL_TEAM_ID` | Global app settings | Global OAuth settings |
+| Shared customer | Exact customer JSON entry without `rtmsApp` | Global app settings | Customer entry |
+| Dedicated customer | Exact customer JSON entry with `rtmsApp` | Customer entry | Customer entry |
 
 Credential selection is fail-closed:
 
-- An enabled exact customer entry uses that customer's S2S OAuth credentials.
+- An enabled exact customer entry uses that customer's S2S OAuth credentials and either the shared or its dedicated RTMS app.
 - The exact `ZOOM_RTMS_GLOBAL_TEAM_ID` uses the global/internal OAuth credentials.
 - Disabled, invalid, and unknown teams do not receive global credentials.
 
@@ -28,18 +36,18 @@ Credential selection is fail-closed:
 
 ## Common Zoom prerequisites
 
-Create one user-managed Zoom General app with RTMS enabled. Configure:
+Every shared or dedicated Zoom General app must have RTMS enabled. Configure:
 
 - `meeting:read:meeting_audio`
 - `meeting:read:meeting_video`
 - `meeting.rtms_started`
 - `meeting.rtms_stopped`
 - `meeting.rtms_interrupted`
-- A public HTTPS event endpoint ending in `/zoom/rtms/webhook`
+- A public HTTPS event endpoint. The shared app uses `/zoom/rtms/webhook`; a dedicated app uses `/zoom/rtms/webhook/apps/<webhookId>`.
 
 The app must have Zoom Developer Pack credits and the Zoom account must allow apps to access shared real-time meeting content. In staging and production, run the meeting bot with `REDIS_CONSUMER_ENABLED=true` so webhook events reach the correct replica.
 
-The following global app credentials are always required:
+The following global app credentials are required for the internal and shared-customer profiles:
 
 ```env
 ZOOM_RTMS_CLIENT_ID=general-app-client-id
@@ -47,7 +55,7 @@ ZOOM_RTMS_CLIENT_SECRET=general-app-client-secret
 ZOOM_RTMS_WEBHOOK_SECRET=general-app-webhook-secret
 ```
 
-They belong to the shared RTMS General app and are used to verify webhooks and connect to RTMS media servers. Customer JSON entries do not replace these values.
+They belong to the shared RTMS General app and are used to verify webhooks and connect to RTMS media servers. A complete customer `rtmsApp` replaces them only for that exact customer.
 
 ## Mode A: internal private app
 
@@ -73,7 +81,7 @@ Every Zoom job still contains a Winkk `teamId`. Only a job whose `teamId` exactl
 
 For a short local test, `ZOOM_RTMS_OAUTH_ACCESS_TOKEN` can replace the account ID, client ID, and client secret. Do not store an expiring access token in production.
 
-## Mode B: customer enablement
+## Mode B: shared app with multiple customers
 
 External customers must be able to authorize the shared RTMS General app. Use either:
 
@@ -126,13 +134,45 @@ Only an explicit Zoom automated-bot block before browser admission triggers RTMS
 
 For RTMS first, set `ZOOM_RECORDING_TRANSPORT=rtms`. Enabled exact customer mappings and the exact internal team remain eligible; all other teams fail closed.
 
+## Mode C: dedicated private app per customer
+
+Use this mode when each customer creates and pays for its own private Zoom General RTMS app and S2S OAuth app. The app stays local to that customer's Zoom account and does not depend on publication of the shared Winkk app.
+
+Add the customer's S2S settings plus a complete `rtmsApp` object:
+
+```json
+{
+  "customer-team-id": {
+    "enabled": true,
+    "accountId": "zoom-account-id",
+    "clientId": "zoom-s2s-client-id",
+    "clientSecret": "zoom-s2s-client-secret",
+    "participantUserId": "zoom-user-id",
+    "rtmsApp": {
+      "webhookId": "customer-app-unique-id",
+      "clientId": "zoom-general-app-client-id",
+      "clientSecret": "zoom-general-app-client-secret",
+      "webhookSecret": "zoom-general-app-webhook-secret"
+    }
+  }
+}
+```
+
+Configure that General app's event endpoint as:
+
+```text
+https://<meeting-bot-host>/zoom/rtms/webhook/apps/customer-app-unique-id
+```
+
+`webhookId` may contain letters, numbers, `_`, and `-`; it must be unique and must not be `global`. Dedicated app settings are all-or-nothing. Invalid, partial, duplicated, disabled, and unknown entries fail closed and never inherit another app.
+
 ## Customer onboarding checklist
 
 1. Confirm the customer's exact Winkk `teamId` from the job payload.
-2. Ensure the shared Winkk General app is approved for external authorization.
-3. Have the customer or their Zoom admin authorize the Winkk app.
+2. For Mode B, ensure the shared Winkk General app is approved for external authorization. For Mode C, activate the customer's private General app.
+3. For Mode B, have the customer admin authorize the shared Winkk app. For Mode C, have the customer activate its own app.
 4. Enable shared real-time meeting content in the customer's Zoom account settings.
-5. Have the customer create and activate their S2S OAuth app with the required admin scope.
+5. Have the customer create and activate their S2S OAuth app with the required admin scope; for Mode C, also collect the dedicated General-app values and unique webhook ID.
 6. Obtain the account ID, client ID, client secret, and Zoom participant user ID securely.
 7. Add an enabled exact entry to the customer JSON in the correct environment.
 8. Restart the process or pods so the environment is reloaded.
@@ -165,7 +205,7 @@ Recommended items:
 
 The automatically generated 1Password `Password` field is not used by the meeting bot. The internal team ID and transport flags are not secrets and can live in the deployment configuration.
 
-Configure a separate public HTTPS `/zoom/rtms/webhook` endpoint for each environment and verify the rendered URL against the current infrastructure before entering it in Zoom.
+Configure a separate public HTTPS `/zoom/rtms/webhook` endpoint for each environment. Dedicated apps append `/apps/<webhookId>`. Verify the rendered URL against the current infrastructure before entering it in Zoom.
 
 After changing a secret, confirm that the 1Password operator updated the Kubernetes Secret and restarted the meeting-bot pods. Never print secret values while checking the deployment.
 
@@ -184,7 +224,7 @@ Disabled and invalid customer entries never fall back to internal credentials.
 | Symptom | Check |
 | --- | --- |
 | Missing credentials for a team | Exact job `teamId`, spelling, JSON key, and `enabled` |
-| Invalid customer configuration | JSON syntax and all required string fields |
+| Invalid customer configuration | JSON syntax, all required strings, and a complete unique `rtmsApp` when dedicated |
 | OAuth token request fails | Customer account ID, S2S client ID, secret, activation, and scopes |
 | Zoom code `3000` | Meeting has not started; the bot retries until the join deadline |
 | Zoom code `2308` or `2309` | Participant role or external-host authorization; customer credentials wait for approval, while global/internal credentials fail immediately |
@@ -193,7 +233,7 @@ Disabled and invalid customer entries never fall back to internal credentials.
 | Zoom code `13262` | The General app client ID is missing from Zoom's "Allow apps to access meeting content" setting |
 | Zoom code `13267` | RTMS app access is disabled in Zoom settings |
 | Zoom code `13273` | The meeting does not support RTMS |
-| No fresh start event | Webhook URL, webhook secret, event subscriptions, Redis, and operator ID |
+| No fresh start event | Correct shared/dedicated webhook URL, webhook secret, event subscriptions, Redis, and operator ID |
 | SDK unavailable | Run RTMS on Linux x64 or macOS arm64 |
 | Duplicate recording rejected | Another stream is already reserved for the meeting and operator |
 

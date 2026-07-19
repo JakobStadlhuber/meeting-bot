@@ -22,10 +22,21 @@ console.log('NODE_ENV', process.env.NODE_ENV);
 
 export interface ZoomRtmsCustomerCredentials {
   enabled: boolean;
+  /** Server-to-Server OAuth account ID. */
   accountId: string;
+  /** Server-to-Server OAuth client ID. */
   clientId: string;
+  /** Server-to-Server OAuth client secret. */
   clientSecret: string;
   participantUserId: string;
+  rtmsApp?: ZoomRtmsCustomerAppCredentials;
+}
+
+export interface ZoomRtmsCustomerAppCredentials {
+  webhookId: string;
+  clientId: string;
+  clientSecret: string;
+  webhookSecret: string;
 }
 
 export interface ZoomRtmsCustomerCredentialsParseResult {
@@ -45,11 +56,22 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   && value !== null
   && !Array.isArray(value);
 
+const isValidExactId = (value: string): boolean =>
+  Boolean(value)
+  && value.trim() === value
+  && value.length <= 256
+  && !/[\u0000-\u001f\u007f]/.test(value);
+
+const isValidWebhookId = (value: string): boolean =>
+  /^[A-Za-z0-9_-]{1,128}$/.test(value)
+  && value !== 'global';
+
 export const parseZoomRtmsCustomerCredentials = (
   rawValue?: string
 ): ZoomRtmsCustomerCredentialsParseResult => {
   const credentials: Record<string, ZoomRtmsCustomerCredentials> = Object.create(null);
   const entryErrors: Record<string, string> = Object.create(null);
+  const teamByWebhookId = new Map<string, string>();
   if (!rawValue?.trim()) return { credentials, entryErrors };
 
   let parsed: unknown;
@@ -72,7 +94,7 @@ export const parseZoomRtmsCustomerCredentials = (
   }
 
   for (const [teamId, value] of Object.entries(parsed)) {
-    if (!teamId.trim() || !isPlainObject(value)) {
+    if (!isValidExactId(teamId) || !isPlainObject(value)) {
       entryErrors[teamId] = 'customer credentials must be an object';
       continue;
     }
@@ -90,12 +112,56 @@ export const parseZoomRtmsCustomerCredentials = (
       continue;
     }
 
+    let rtmsApp: ZoomRtmsCustomerAppCredentials | undefined;
+    if (typeof value.rtmsApp !== 'undefined') {
+      if (!isPlainObject(value.rtmsApp)) {
+        entryErrors[teamId] = 'rtmsApp must be an object';
+        continue;
+      }
+
+      const invalidAppFields: string[] = [];
+      for (const field of ['webhookId', 'clientId', 'clientSecret', 'webhookSecret'] as const) {
+        if (typeof value.rtmsApp[field] !== 'string' || !value.rtmsApp[field].trim()) {
+          invalidAppFields.push(`rtmsApp.${field}`);
+        }
+      }
+      if (
+        typeof value.rtmsApp.webhookId === 'string'
+        && value.rtmsApp.webhookId.trim()
+        && !isValidWebhookId(value.rtmsApp.webhookId)
+      ) {
+        invalidAppFields.push('rtmsApp.webhookId');
+      }
+      if (invalidAppFields.length > 0) {
+        entryErrors[teamId] = `invalid or missing fields: ${Array.from(new Set(invalidAppFields)).join(', ')}`;
+        continue;
+      }
+
+      const webhookId = value.rtmsApp.webhookId as string;
+      const existingTeamId = teamByWebhookId.get(webhookId);
+      if (existingTeamId) {
+        delete credentials[existingTeamId];
+        entryErrors[existingTeamId] = 'rtmsApp.webhookId must be unique';
+        entryErrors[teamId] = 'rtmsApp.webhookId must be unique';
+        continue;
+      }
+
+      teamByWebhookId.set(webhookId, teamId);
+      rtmsApp = {
+        webhookId,
+        clientId: (value.rtmsApp.clientId as string).trim(),
+        clientSecret: (value.rtmsApp.clientSecret as string).trim(),
+        webhookSecret: (value.rtmsApp.webhookSecret as string).trim(),
+      };
+    }
+
     credentials[teamId] = {
       enabled: value.enabled as boolean,
       accountId: (value.accountId as string).trim(),
       clientId: (value.clientId as string).trim(),
       clientSecret: (value.clientSecret as string).trim(),
       participantUserId: (value.participantUserId as string).trim(),
+      ...(rtmsApp ? { rtmsApp } : {}),
     };
   }
 
@@ -206,6 +272,25 @@ if (!['browser', 'rtms'].includes(zoomRecordingTransport)) {
   throw new Error('ZOOM_RECORDING_TRANSPORT must be browser or rtms');
 }
 
+export type ZoomRtmsTransportStrategy =
+  | 'browser_only'
+  | 'browser_then_rtms'
+  | 'rtms_only';
+
+export const deriveZoomRtmsTransportStrategy = (
+  transport: 'browser' | 'rtms',
+  fallbackEnabled: boolean
+): ZoomRtmsTransportStrategy => {
+  if (transport === 'rtms') return 'rtms_only';
+  return fallbackEnabled ? 'browser_then_rtms' : 'browser_only';
+};
+
+const zoomRtmsFallbackEnabled = process.env.ZOOM_RTMS_FALLBACK_ENABLED === 'true';
+const zoomTransportStrategy = deriveZoomRtmsTransportStrategy(
+  zoomRecordingTransport as 'browser' | 'rtms',
+  zoomRtmsFallbackEnabled
+);
+
 const zoomRtmsEventTtlSeconds = process.env.ZOOM_RTMS_EVENT_TTL_SECONDS
   ? Number(process.env.ZOOM_RTMS_EVENT_TTL_SECONDS)
   : 3600;
@@ -252,7 +337,8 @@ export default {
   zoomChromeCustomerStorageStatePathErrors: zoomChromeCustomerStorageStatePaths.entryErrors,
   zoomChromeCustomerStorageStatePathsError: zoomChromeCustomerStorageStatePaths.error,
   zoomRecordingTransport: zoomRecordingTransport as 'browser' | 'rtms',
-  zoomRtmsFallbackEnabled: process.env.ZOOM_RTMS_FALLBACK_ENABLED === 'true',
+  zoomRtmsFallbackEnabled,
+  zoomTransportStrategy,
   zoomRtms: {
     clientId: process.env.ZOOM_RTMS_CLIENT_ID,
     clientSecret: process.env.ZOOM_RTMS_CLIENT_SECRET,

@@ -14,7 +14,12 @@ test.afterEach(() => {
   config.isRedisEnabled = originalRedisEnabled;
 });
 
-const scope = (customerId: string, operatorId: string): ZoomRtmsEventScope => ({
+const scope = (
+  customerId: string,
+  operatorId: string,
+  appId = 'global'
+): ZoomRtmsEventScope => ({
+  appId,
   customerId,
   operatorId,
 });
@@ -106,6 +111,21 @@ test('allows only one customer reservation for the same meeting and Zoom operato
   assert.deepEqual(await store.waitForMeetingStart('12345678901', teamA, 1), event);
 });
 
+test('isolates identical events and reservations across dedicated apps', async () => {
+  const store = new ZoomRtmsEventStore();
+  const teamA = scope('team-a', 'shared-operator', 'app-a');
+  const teamB = scope('team-b', 'shared-operator', 'app-b');
+
+  assert.equal(await store.reserveMeeting('12345678901', 'owner-a', 60, teamA), true);
+  assert.equal(await store.reserveMeeting('12345678901', 'owner-b', 60, teamB), true);
+
+  const event = startEvent(13, 'shared-operator', 'shared-stream');
+  assert.equal(await store.publish(event, 'app-a'), true);
+  assert.equal(await store.publish(event, 'app-b'), true);
+  assert.deepEqual(await store.waitForMeetingStart('12345678901', teamA, 1), event);
+  assert.deepEqual(await store.waitForMeetingStart('12345678901', teamB, 1), event);
+});
+
 test('moves early stream stop events into the owning customer queue', async () => {
   const store = new ZoomRtmsEventStore();
   const eventScope = scope('team-a', 'operator-id');
@@ -134,5 +154,30 @@ test('prevents another customer from taking ownership of an active stream', asyn
   await assert.rejects(
     store.markStreamActive('stream-id', scope('team-b', 'operator-b')),
     /already owned by another customer/
+  );
+
+  await store.markStreamActive('stream-id', scope('team-b', 'operator-b', 'dedicated-app'));
+});
+
+test('keeps pending stream events isolated by app', async () => {
+  const store = new ZoomRtmsEventStore();
+  const teamA = scope('team-a', 'operator-id', 'app-a');
+  const teamB = scope('team-b', 'operator-id', 'app-b');
+  const stopped: ZoomRtmsWebhookEvent = {
+    event: 'meeting.rtms_stopped',
+    event_ts: 14,
+    payload: {
+      meeting_uuid: 'meeting-uuid',
+      rtms_stream_id: 'shared-stream-id',
+      stop_reason: 6,
+    },
+  };
+
+  await store.publish(stopped, 'app-a');
+  await store.markStreamActive('shared-stream-id', teamB);
+  await store.markStreamActive('shared-stream-id', teamA);
+  assert.deepEqual(
+    await store.waitForStreamEvent('shared-stream-id', teamA, 1),
+    stopped
   );
 });

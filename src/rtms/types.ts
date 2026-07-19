@@ -30,6 +30,18 @@ export interface ZoomWebhookBody {
   payload?: Record<string, unknown>;
 }
 
+export type ZoomRtmsCredentialMode =
+  | 'internal'
+  | 'shared_customer'
+  | 'dedicated_customer';
+
+export interface ZoomRtmsAppCredentials {
+  appId: string;
+  clientId: string;
+  clientSecret: string;
+  webhookSecret: string;
+}
+
 export interface ZoomRtmsApiCredentials {
   source: 'customer' | 'legacy';
   customerId: string;
@@ -42,6 +54,7 @@ export interface ZoomRtmsApiCredentials {
 }
 
 export interface ZoomRtmsEventScope {
+  appId: string;
   customerId: string;
   operatorId?: string;
 }
