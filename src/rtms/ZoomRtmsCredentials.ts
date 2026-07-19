@@ -23,12 +23,12 @@ export interface ResolvedZoomRtmsCredentials {
   eventScope: ZoomRtmsEventScope;
 }
 
-const legacyCredentials = (): ResolvedZoomRtmsCredentials => {
+const globalCredentials = (teamId: string): ResolvedZoomRtmsCredentials => {
   const rtmsClientId = config.zoomRtms.clientId;
   if (!rtmsClientId) {
     throw new ZoomRtmsCredentialConfigurationError(
       'invalid_global_configuration',
-      'legacy',
+      teamId,
       'ZOOM_RTMS_CLIENT_ID is required for RTMS'
     );
   }
@@ -42,15 +42,15 @@ const legacyCredentials = (): ResolvedZoomRtmsCredentials => {
   if (!hasAccessToken && !hasServerCredentials) {
     throw new ZoomRtmsCredentialConfigurationError(
       'invalid_global_configuration',
-      'legacy',
-      'Configure ZOOM_RTMS_OAUTH_ACCESS_TOKEN or the legacy Zoom RTMS OAuth account credentials'
+      teamId,
+      'Configure ZOOM_RTMS_OAUTH_ACCESS_TOKEN or the global Zoom RTMS OAuth account credentials'
     );
   }
 
   return {
     api: {
       source: 'legacy',
-      customerId: 'legacy',
+      customerId: teamId,
       rtmsClientId,
       participantUserId: config.zoomRtms.participantUserId,
       oauthAccessToken: config.zoomRtms.oauthAccessToken,
@@ -59,15 +59,14 @@ const legacyCredentials = (): ResolvedZoomRtmsCredentials => {
       oauthClientSecret: config.zoomRtms.oauthClientSecret,
     },
     eventScope: {
-      customerId: 'legacy',
+      customerId: teamId,
       operatorId: config.zoomRtms.participantUserId,
     },
   };
 };
 
 export const resolveZoomRtmsCredentials = (
-  teamId: string,
-  allowLegacy = config.zoomRecordingTransport === 'rtms'
+  teamId: string
 ): ResolvedZoomRtmsCredentials => {
   const customer = config.zoomRtms.customerCredentials[teamId];
   if (customer?.enabled) {
@@ -97,8 +96,6 @@ export const resolveZoomRtmsCredentials = (
     };
   }
 
-  if (allowLegacy) return legacyCredentials();
-
   if (config.zoomRtms.customerCredentialsError) {
     throw new ZoomRtmsCredentialConfigurationError(
       'invalid_customer_configuration',
@@ -122,6 +119,10 @@ export const resolveZoomRtmsCredentials = (
       teamId,
       `Zoom RTMS fallback is disabled for team ${teamId}`
     );
+  }
+
+  if (config.zoomRtms.globalTeamId === teamId) {
+    return globalCredentials(teamId);
   }
 
   throw new ZoomRtmsCredentialsMissingError(teamId);

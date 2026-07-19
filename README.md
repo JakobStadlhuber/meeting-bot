@@ -127,7 +127,9 @@ Content-Type: application/json
 
 Zoom uses the browser recorder by default. With `ZOOM_RTMS_FALLBACK_ENABLED=true`, only an explicit Zoom automated-bot rejection before admission can fall back to RTMS. Host rejection, sign-in requirements, lobby timeouts, browser crashes and recording failures never trigger that fallback.
 
-Fallback credentials are selected by the job's `teamId` from `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON`. Store S2S account credentials, not short-lived access tokens:
+See [Zoom RTMS operations and customer onboarding](docs/zoom-rtms.md) for the complete setup, deployment modes, Zoom prerequisites, customer onboarding, and troubleshooting guide.
+
+Fallback credentials are selected by the job's exact `teamId`: customer teams use `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON`, while the exact `ZOOM_RTMS_GLOBAL_TEAM_ID` uses the internal/global settings. Store customer S2S account credentials, not short-lived access tokens:
 
 ```json
 {
@@ -141,14 +143,20 @@ Fallback credentials are selected by the job's `teamId` from `ZOOM_RTMS_CUSTOMER
 }
 ```
 
-To record through Zoom Realtime Media Streams instead, set `ZOOM_RECORDING_TRANSPORT=rtms` and configure a user-managed Zoom General app with RTMS enabled. Set its public HTTPS webhook endpoint to `POST /zoom/rtms/webhook` and subscribe to `meeting.rtms_started`, `meeting.rtms_stopped`, and `meeting.rtms_interrupted`.
+To use global/internal Zoom Realtime Media Streams directly, set `ZOOM_RECORDING_TRANSPORT=rtms`, set `ZOOM_RTMS_GLOBAL_TEAM_ID` to the exact internal job `teamId`, and configure a user-managed Zoom General app with RTMS enabled. Customer RTMS-first operation instead requires an enabled exact customer JSON entry. Set the General app's public HTTPS webhook endpoint to `POST /zoom/rtms/webhook` and subscribe to `meeting.rtms_started`, `meeting.rtms_stopped`, and `meeting.rtms_interrupted`.
 
-Required settings:
+Shared RTMS app settings:
 
 - `ZOOM_RTMS_CLIENT_ID`, `ZOOM_RTMS_CLIENT_SECRET`, `ZOOM_RTMS_WEBHOOK_SECRET`
+- `REDIS_CONSUMER_ENABLED=true` for staging/production so webhook events reach the correct recording replica
+
+Internal/global mode only:
+
+- `ZOOM_RTMS_GLOBAL_TEAM_ID` to restrict the global/internal OAuth credentials to one exact Winkk team
 - Prefer a Server-to-Server OAuth app with `ZOOM_RTMS_OAUTH_ACCOUNT_ID`, `ZOOM_RTMS_OAUTH_CLIENT_ID`, and `ZOOM_RTMS_OAUTH_CLIENT_SECRET`; a short-lived `ZOOM_RTMS_OAUTH_ACCESS_TOKEN` is also supported for local testing
 - `ZOOM_RTMS_PARTICIPANT_USER_ID` to select and correlate the authorized host when using account-level OAuth
-- `REDIS_CONSUMER_ENABLED=true` for staging/production so webhook events reach the correct recording replica
+
+Customer mode uses the exact enabled `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` entry instead of the internal/global OAuth settings.
 
 The General app needs `meeting:read:meeting_audio` and `meeting:read:meeting_video`; the OAuth app needs `meeting:update:participant_rtms_app_status` or its admin variant. The app must be authorized by the meeting host/account. RTMS does not anonymously join arbitrary Zoom links; the password in a join URL is not used. The RTMS output contains Zoom's mixed audio and active-speaker H.264 video and is uploaded as MP4 through the existing uploader. The official RTMS Node SDK currently requires Linux x64 (or macOS arm64); the browser transport remains available on other image architectures.
 
@@ -501,7 +509,8 @@ Notes:
 | `ZOOM_CHROME_CDP_URL` | Optional CDP endpoint for isolated Zoom browser contexts. | - |
 | `ZOOM_RECORDING_TRANSPORT` | Primary Zoom transport (`browser` or `rtms`). | `browser` |
 | `ZOOM_RTMS_FALLBACK_ENABLED` | Allow RTMS only after an explicit pre-join Zoom automated-bot block. | `false` |
-| `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` | Team-keyed S2S OAuth credentials for the RTMS fallback. | - |
+| `ZOOM_RTMS_GLOBAL_TEAM_ID` | Exact internal team allowed to use global RTMS OAuth credentials. | - |
+| `ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON` | Exact team-keyed customer S2S OAuth credentials for RTMS. | - |
 | `SENTRY_DSN` | Optional Sentry DSN; monitoring is a complete no-op when omitted. | - |
 | `SENTRY_ENVIRONMENT` | Sentry environment tag. | `NODE_ENV` |
 | `SENTRY_RELEASE` | Sentry release tag. | - |

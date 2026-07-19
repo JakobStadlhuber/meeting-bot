@@ -216,6 +216,18 @@ if (!Number.isFinite(zoomRtmsEventTtlSeconds) || zoomRtmsEventTtlSeconds <= 0) {
 const zoomRtmsCustomerCredentials = parseZoomRtmsCustomerCredentials(
   process.env.ZOOM_RTMS_CUSTOMER_CREDENTIALS_JSON
 );
+const zoomRtmsGlobalTeamId = process.env.ZOOM_RTMS_GLOBAL_TEAM_ID;
+if (
+  typeof zoomRtmsGlobalTeamId !== 'undefined'
+  && (
+    !zoomRtmsGlobalTeamId
+    || zoomRtmsGlobalTeamId.trim() !== zoomRtmsGlobalTeamId
+    || zoomRtmsGlobalTeamId.length > 256
+    || /[\u0000-\u001f\u007f]/.test(zoomRtmsGlobalTeamId)
+  )
+) {
+  throw new Error('ZOOM_RTMS_GLOBAL_TEAM_ID must contain one valid exact teamId');
+}
 const zoomChromeCustomerStorageStatePaths = parseZoomChromeCustomerStorageStatePaths(
   process.env.ZOOM_CHROME_CUSTOMER_STORAGE_STATE_PATHS_JSON
 );
@@ -250,6 +262,7 @@ export default {
     oauthClientId: process.env.ZOOM_RTMS_OAUTH_CLIENT_ID,
     oauthClientSecret: process.env.ZOOM_RTMS_OAUTH_CLIENT_SECRET,
     participantUserId: process.env.ZOOM_RTMS_PARTICIPANT_USER_ID,
+    globalTeamId: zoomRtmsGlobalTeamId,
     eventTtlSeconds: zoomRtmsEventTtlSeconds,
     customerCredentials: zoomRtmsCustomerCredentials.credentials,
     customerCredentialErrors: zoomRtmsCustomerCredentials.entryErrors,

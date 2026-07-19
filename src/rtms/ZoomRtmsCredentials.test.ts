@@ -18,6 +18,7 @@ const original = {
   oauthClientId: config.zoomRtms.oauthClientId,
   oauthClientSecret: config.zoomRtms.oauthClientSecret,
   participantUserId: config.zoomRtms.participantUserId,
+  globalTeamId: config.zoomRtms.globalTeamId,
   customerCredentials: config.zoomRtms.customerCredentials,
   customerCredentialErrors: config.zoomRtms.customerCredentialErrors,
   customerCredentialsError: config.zoomRtms.customerCredentialsError,
@@ -39,6 +40,7 @@ test.beforeEach(() => {
   config.zoomRtms.oauthClientId = undefined;
   config.zoomRtms.oauthClientSecret = undefined;
   config.zoomRtms.participantUserId = undefined;
+  config.zoomRtms.globalTeamId = undefined;
   config.zoomRtms.customerCredentials = Object.create(null);
   config.zoomRtms.customerCredentialErrors = Object.create(null);
   config.zoomRtms.customerCredentialsError = undefined;
@@ -52,6 +54,7 @@ test.after(() => {
   config.zoomRtms.oauthClientId = original.oauthClientId;
   config.zoomRtms.oauthClientSecret = original.oauthClientSecret;
   config.zoomRtms.participantUserId = original.participantUserId;
+  config.zoomRtms.globalTeamId = original.globalTeamId;
   config.zoomRtms.customerCredentials = original.customerCredentials;
   config.zoomRtms.customerCredentialErrors = original.customerCredentialErrors;
   config.zoomRtms.customerCredentialsError = original.customerCredentialsError;
@@ -104,14 +107,70 @@ test('fails typed for missing, disabled, and invalid fallback credentials', () =
   );
 });
 
-test('uses legacy global OAuth only for explicit RTMS mode', () => {
-  config.zoomRecordingTransport = 'rtms';
+test('uses global OAuth only for the explicitly configured internal team', () => {
+  config.zoomRtms.globalTeamId = 'internal-team';
   config.zoomRtms.oauthAccessToken = 'legacy-access-token';
   config.zoomRtms.participantUserId = 'legacy-operator';
 
-  const selected = resolveZoomRtmsCredentials('team-without-mapping');
+  const selected = resolveZoomRtmsCredentials('internal-team');
   assert.equal(selected.api.source, 'legacy');
   assert.equal(selected.api.oauthAccessToken, 'legacy-access-token');
-  assert.equal(selected.eventScope.customerId, 'legacy');
+  assert.equal(selected.eventScope.customerId, 'internal-team');
   assert.equal(selected.eventScope.operatorId, 'legacy-operator');
+
+  assert.throws(
+    () => resolveZoomRtmsCredentials('team-without-mapping'),
+    ZoomRtmsCredentialsMissingError
+  );
+});
+
+test('never falls back to global OAuth for disabled or invalid customer credentials', () => {
+  config.zoomRtms.globalTeamId = 'internal-team';
+  config.zoomRtms.oauthAccessToken = 'legacy-access-token';
+  config.zoomRtms.customerCredentials['internal-team'] = customer(false);
+
+  assert.throws(
+    () => resolveZoomRtmsCredentials('internal-team'),
+    (error: unknown) => error instanceof ZoomRtmsCredentialConfigurationError
+      && error.reason === 'disabled'
+  );
+
+  delete config.zoomRtms.customerCredentials['internal-team'];
+  config.zoomRtms.customerCredentialErrors['internal-team'] = 'invalid fields';
+  assert.throws(
+    () => resolveZoomRtmsCredentials('internal-team'),
+    (error: unknown) => error instanceof ZoomRtmsCredentialConfigurationError
+      && error.reason === 'invalid_customer_configuration'
+  );
+
+  config.zoomRtms.customerCredentialErrors = Object.create(null);
+  config.zoomRtms.customerCredentialsError = 'invalid JSON';
+  assert.throws(
+    () => resolveZoomRtmsCredentials('internal-team'),
+    (error: unknown) => error instanceof ZoomRtmsCredentialConfigurationError
+      && error.reason === 'invalid_customer_configuration'
+  );
+});
+
+test('supports internal and customer credentials in the same deployment', () => {
+  config.zoomRtms.globalTeamId = 'internal-team';
+  config.zoomRtms.oauthAccessToken = 'legacy-access-token';
+  config.zoomRtms.customerCredentials['customer-team'] = customer();
+
+  assert.equal(resolveZoomRtmsCredentials('internal-team').api.source, 'legacy');
+  assert.equal(resolveZoomRtmsCredentials('customer-team').api.source, 'customer');
+  assert.throws(
+    () => resolveZoomRtmsCredentials('unknown-team'),
+    ZoomRtmsCredentialsMissingError
+  );
+});
+
+test('prefers an enabled exact customer mapping over global credentials', () => {
+  config.zoomRtms.globalTeamId = 'shared-team';
+  config.zoomRtms.oauthAccessToken = 'legacy-access-token';
+  config.zoomRtms.customerCredentials['shared-team'] = customer();
+
+  const selected = resolveZoomRtmsCredentials('shared-team');
+  assert.equal(selected.api.source, 'customer');
+  assert.equal(selected.api.oauthAccountId, 'account-a');
 });
